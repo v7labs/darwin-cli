@@ -109,11 +109,6 @@ def parse_annotation(annotation: Dict[str, Any], category_lookup_table: Dict[str
     """
     category = category_lookup_table[annotation["category_id"]]
     segmentation = annotation["segmentation"]
-    iscrowd = annotation.get("iscrowd") == 1
-
-    if iscrowd:
-        print("Warning, unsupported RLE, skipping")
-        return None
 
     if len(segmentation) == 0 and len(annotation["bbox"]) == 4:
         x, y, w, h = map(int, annotation["bbox"])
@@ -132,18 +127,32 @@ def parse_annotation(annotation: Dict[str, Any], category_lookup_table: Dict[str
         _labels, external, _internal = find_contours(mask)
         paths = []
         for external_path in external:
+            new_path = []
             # skip paths with less than 2 points
             if len(external_path) // 2 <= 2:
                 continue
-            path = []
             points = iter(external_path)
             while True:
                 try:
                     x, y = next(points), next(points)
-                    path.append({"x": x, "y": y})
+                    new_path.append({"x": x, "y": y})
                 except StopIteration:
                     break
-            paths.append(path)
+            paths.append(new_path)
+
+        for internal_path in _internal:
+            new_path = []
+            # skip paths with less than 2 points
+            if len(internal_path) // 2 <= 2:
+                continue
+            points = iter(internal_path)
+            while True:
+                try:
+                    x, y = next(points), next(points)
+                    new_path.append({"x": x, "y": y})
+                except StopIteration:
+                    break
+            paths.append(new_path)
         return dt.make_complex_polygon(category["name"], paths)
     elif isinstance(segmentation, list):
         path = []
