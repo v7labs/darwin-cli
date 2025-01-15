@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from rich.console import Console
 
-from darwin.utils import attempt_decode
+from darwin.utils import attempt_decode, get_primary_plane_from_nifti
 
 console = Console()
 try:
@@ -106,7 +106,7 @@ def _parse_nifti(
     remote_file_path: Path,
     remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
 ) -> dt.AnnotationFile:
-    img, pixdims = process_nifti(
+    img, pixdims, primary_plane = process_nifti(
         nib.load(nifti_path),
         remote_file_path=remote_file_path,
         remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
@@ -129,6 +129,7 @@ def _parse_nifti(
                     slot_names=slot_names,
                     is_mpr=is_mpr,
                     pixdims=pixdims,
+                    primary_plane=primary_plane,
                     legacy=legacy,
                 )
                 if _video_annotations:
@@ -144,6 +145,7 @@ def _parse_nifti(
                 slot_names=slot_names,
                 is_mpr=is_mpr,
                 pixdims=pixdims,
+                primary_plane=primary_plane,
                 legacy=legacy,
             )
             if _video_annotations is None:
@@ -193,6 +195,7 @@ def get_polygon_video_annotations(
     slot_names: List[str],
     is_mpr: bool,
     pixdims: Tuple[float],
+    primary_plane: str,
     legacy: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     if not is_mpr:
@@ -201,7 +204,7 @@ def get_polygon_video_annotations(
             class_name,
             class_idxs,
             slot_names,
-            view_idx=2,
+            primary_plane=primary_plane,
             pixdims=pixdims,
             legacy=legacy,
         )
@@ -213,7 +216,7 @@ def get_polygon_video_annotations(
                 class_name,
                 class_idxs,
                 [slot_name],
-                view_idx=view_idx,
+                primary_plane=primary_plane,
                 pixdims=pixdims,
                 legacy=legacy,
             )
@@ -329,19 +332,20 @@ def nifti_to_video_polygon_annotation(
     class_name: str,
     class_idxs: List[int],
     slot_names: List[str],
-    view_idx: int = 2,
-    pixdims: Tuple[int, int, int] = (1, 1, 1),
+    primary_plane: str,
+    pixdims: Tuple[float, float, float] = (1, 1, 1),
     legacy: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     frame_annotations = OrderedDict()
-    for i in range(volume.shape[view_idx]):
-        if view_idx == 2:
+    view_idxs = {"AXIAL": 2, "CORONAL": 1, "SAGITTAL": 0}
+    for i in range(volume.shape[view_idxs[primary_plane]]):
+        if primary_plane == "AXIAL":
             slice_mask = volume[:, :, i].astype(np.uint8)
             _pixdims = [pixdims[0], pixdims[1]]
-        elif view_idx == 1:
+        elif primary_plane == "CORONAL":
             slice_mask = volume[:, i, :].astype(np.uint8)
             _pixdims = [pixdims[0], pixdims[2]]
-        elif view_idx == 0:
+        elif primary_plane == "SAGITTAL":
             slice_mask = volume[i, :, :].astype(np.uint8)
             _pixdims = [pixdims[1], pixdims[2]]
         class_mask = np.isin(slice_mask, class_idxs).astype(np.uint8).copy()
@@ -524,7 +528,7 @@ def process_nifti(
     ornt: Optional[List[List[float]]] = [[0.0, -1.0], [1.0, -1.0], [2.0, -1.0]],
     remote_file_path: Path = Path("/"),
     remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
-) -> Tuple[np.ndarray, Tuple[float]]:
+) -> Tuple[np.ndarray, Tuple[float], str]:
     """
     Converts a NifTI object of any orientation to the passed ornt orientation.
     The default ornt is LPI.
@@ -553,6 +557,7 @@ def process_nifti(
     Returns:
         data_array: pixel array with orientation ornt.
         pixdims: tuple of nifti header zoom values.
+        primary_plane: string indicating the primary anatomical plane.
     """
     img = correct_nifti_header_if_necessary(input_data)
     orig_ax_codes = nib.orientations.aff2axcodes(img.affine)
@@ -567,8 +572,8 @@ def process_nifti(
     reoriented_img = img.as_reoriented(transform)
     data_array = reoriented_img.get_fdata()
     pixdims = reoriented_img.header.get_zooms()
-
-    return data_array, pixdims
+    primary_plane = get_primary_plane_from_nifti(reoriented_img.affine)
+    return data_array, pixdims, primary_plane
 
 
 def convert_to_dense_rle(raster: np.ndarray) -> List[int]:
