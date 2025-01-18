@@ -244,6 +244,55 @@ class Annotation:
                 return sub
         return None
 
+    def scale_coordinates(self, x_scale: float, y_scale: float) -> None:
+        """
+        Multiplies the coordinates of the annotation by the given values.
+
+        Parameters
+        ----------
+        x_scale : float
+            Scale factor for x coordinates
+        y_scale : float
+            Scale factor for y coordinates
+        """
+        annotation_type = (
+            self.annotation_class.annotation_type
+            if hasattr(self, "annotation_class")
+            else None
+        )
+
+        if annotation_type == "bounding_box":
+            self.data["x"] *= x_scale
+            self.data["y"] *= y_scale
+            self.data["w"] *= x_scale
+            self.data["h"] *= y_scale
+
+        elif annotation_type == "polygon":
+            for path in self.data["paths"]:
+                for point in path:
+                    point["x"] *= x_scale
+                    point["y"] *= y_scale
+
+        elif annotation_type == "ellipse":
+            self.data["center"]["x"] *= x_scale
+            self.data["center"]["y"] *= y_scale
+            self.data["radius"]["x"] *= x_scale
+            self.data["radius"]["y"] *= y_scale
+
+        elif annotation_type == "line":
+            for point in self.data["path"]:
+                point["x"] *= x_scale
+                point["y"] *= y_scale
+
+        elif annotation_type == "keypoint":
+            self.data["x"] *= x_scale
+            self.data["y"] *= y_scale
+
+        elif annotation_type == "skeleton":
+            for node in self.data["nodes"]:
+                node["x"] *= x_scale
+                node["y"] *= y_scale
+
 
 @dataclass(frozen=False, eq=True)
 class VideoAnnotation:
