@@ -695,7 +695,7 @@ class Client:
             "Authorization": f"ApiKey {api_key}",
         }
         api_url: str = Client.default_api_url()
-        response: requests.Response = cls._get_raw_from_full_url(
+        response: requests.Response = requests.get(
             urljoin(api_url, "/users/token_info"), headers=headers
         )
 

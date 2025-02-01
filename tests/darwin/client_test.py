@@ -591,6 +591,7 @@ class TestClientRetry:
         mock_response = Mock(spec=Response)
         mock_response.status_code = 429
         mock_response.headers = {}
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
 
         with patch("requests.Session.get") as mock_get:
             mock_get.return_value = mock_response
