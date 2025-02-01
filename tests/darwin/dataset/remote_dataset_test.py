@@ -1896,50 +1896,62 @@ class TestGetRemoteFilesThatRequireLegacyScaling:
     @pytest.fixture
     def mock_remote_files(self):
         return [
+            # Pre `MED_2D_VIEWER` file
             DatasetItem(
                 id=1,
-                filename="filename",
+                filename="not_handled_by_monai",
                 status="new",
                 archived=False,
-                filesize=1024,  # Example size in bytes
+                filesize=2048,
                 dataset_id=1,
                 dataset_slug="test-dataset",
                 seq=1,
                 current_workflow_id=None,
-                path="/path/to/file",
+                path="/path/to",
                 slots=[
                     {
                         "slot_name": "0",
                         "metadata": {
-                            "medical": {"handler": "MONAI", "affine": [1, 0, 0, 0]}
+                            "medical": {
+                                "raiCode": "LPS",
+                                "affine": [
+                                    [-1, 0, 0, 0],
+                                    [0, -1, 0, 0],
+                                    [0, 0, -1, 0],
+                                    [0, 0, 0, 1],
+                                ],
+                            }
                         },
                     }
                 ],
                 layout={},
                 current_workflow=None,
             ),
+            # Post `MED_2D_VIEWER` file
             DatasetItem(
                 id=2,
-                filename="filename",
+                filename="handled_by_monai",
                 status="new",
                 archived=False,
-                filesize=2048,  # Example size in bytes
+                filesize=3072,
                 dataset_id=1,
                 dataset_slug="test-dataset",
                 seq=2,
                 current_workflow_id=None,
-                path="/path/to/file",
+                path="/path/to",
                 slots=[
                     {
                         "slot_name": "0",
                         "metadata": {
                             "medical": {
+                                "handler": "MONAI",
+                                "raiCode": "RAS",
                                 "affine": [
                                     [-1, 0, 0, 0],
                                     [0, -1, 0, 0],
                                     [0, 0, -1, 0],
                                     [0, 0, 0, 1],
-                                ]
+                                ],
                             }
                         },
                     }
@@ -1962,8 +1974,80 @@ class TestGetRemoteFilesThatRequireLegacyScaling:
             dataset_id=1,
         )
 
-        result = remote_dataset._get_remote_files_that_require_legacy_scaling()
-        assert Path("/path/to/file/filename") in result
-        np.testing.assert_array_equal(
-            result[Path("/path/to/file/filename")]["0"], np.array([[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])  # type: ignore
+        remote_files_that_require_legacy_scaling, remote_file_orientations = (
+            remote_dataset._get_remote_files_that_require_legacy_scaling()
         )
+
+        assert (
+            Path("/path/to/not_handled_by_monai")
+            in remote_files_that_require_legacy_scaling
+        )
+        np.testing.assert_array_equal(
+            remote_files_that_require_legacy_scaling[
+                Path("/path/to/not_handled_by_monai")
+            ]["0"],
+            np.array([[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]),
+        )
+        assert (
+            Path("/path/to/handled_by_monai")
+            not in remote_files_that_require_legacy_scaling
+        )
+
+        assert Path("/path/to/handled_by_monai") in remote_file_orientations
+        assert remote_file_orientations[Path("/path/to/handled_by_monai")]["0"] == "RAS"
+        assert Path("/path/to/not_handled_by_monai") not in remote_file_orientations
+
+    @patch.object(RemoteDatasetV2, "fetch_remote_files")
+    def test_get_remote_files_that_require_legacy_scaling_empty_response(
+        self, mock_fetch_remote_files
+    ):
+        mock_fetch_remote_files.return_value = []
+        remote_dataset = RemoteDatasetV2(
+            client=MagicMock(),
+            team="test-team",
+            name="test-dataset",
+            slug="test-dataset",
+            dataset_id=1,
+        )
+
+        remote_files_that_require_legacy_scaling, remote_file_orientations = (
+            remote_dataset._get_remote_files_that_require_legacy_scaling()
+        )
+        assert len(remote_files_that_require_legacy_scaling) == 0
+        assert len(remote_file_orientations) == 0
+
+    @patch.object(RemoteDatasetV2, "fetch_remote_files")
+    def test_get_remote_files_that_require_legacy_scaling_no_medical_metadata(
+        self, mock_fetch_remote_files
+    ):
+        mock_remote_files = [
+            DatasetItem(
+                id=1,
+                filename="no_medical_metadata",
+                status="new",
+                archived=False,
+                filesize=1024,
+                dataset_id=1,
+                dataset_slug="test-dataset",
+                seq=1,
+                current_workflow_id=None,
+                path="/path/to",
+                slots=[{"slot_name": "0", "metadata": {}}],
+                layout={},
+                current_workflow=None,
+            )
+        ]
+        mock_fetch_remote_files.return_value = mock_remote_files
+        remote_dataset = RemoteDatasetV2(
+            client=MagicMock(),
+            team="test-team",
+            name="test-dataset",
+            slug="test-dataset",
+            dataset_id=1,
+        )
+
+        affine_maps, orientations = (
+            remote_dataset._get_remote_files_that_require_legacy_scaling()
+        )
+        assert len(affine_maps) == 0
+        assert len(orientations) == 0

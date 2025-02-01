@@ -118,6 +118,7 @@ def _find_and_parse(  # noqa: C901
     use_multi_cpu: bool = True,
     cpu_limit: int = 1,
     remote_files_that_require_legacy_scaling: Optional[List[Path]] = None,
+    remote_file_orientations: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Optional[Iterable[dt.AnnotationFile]]:
     is_console = console is not None
 
@@ -152,6 +153,7 @@ def _find_and_parse(  # noqa: C901
                         lambda file: importer(
                             file,
                             remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,  # type: ignore
+                            remote_file_orientations=remote_file_orientations,  # type: ignore
                         ),
                         tqdm(files),
                     )
@@ -173,6 +175,7 @@ def _find_and_parse(  # noqa: C901
                 importer(
                     file,
                     remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,  # type: ignore
+                    remote_file_orientations=remote_file_orientations,  # type: ignore
                 )
                 for file in tqdm(files)
             ]
@@ -1253,9 +1256,10 @@ def import_annotations(  # noqa: C901
     local_files = []
     local_files_missing_remotely = []
     if importer.__module__ == "darwin.importer.formats.nifti":
-        remote_files_that_require_legacy_scaling = (
-            dataset._get_remote_files_that_require_legacy_scaling()
-        )
+        (
+            remote_files_that_require_legacy_scaling,
+            remote_file_orientations,
+        ) = dataset._get_remote_files_that_require_legacy_scaling()
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
             importer,
             file_paths,
@@ -1263,6 +1267,7 @@ def import_annotations(  # noqa: C901
             use_multi_cpu,
             cpu_limit,
             remote_files_that_require_legacy_scaling,
+            remote_file_orientations,
         )
     else:
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(

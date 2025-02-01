@@ -32,6 +32,7 @@ from darwin.importer.formats.nifti_schemas import nifti_import_schema
 def parse_path(
     path: Path,
     remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
+    remote_file_orientations: Dict[Path, Dict[str, Any]] = {},
 ) -> Optional[List[dt.AnnotationFile]]:
     """
     Parses the given ``nifti`` file and returns a ``List[dt.AnnotationFile]`` with the parsed
@@ -43,6 +44,8 @@ def parse_path(
         The ``Path`` to the ``nifti`` file.
     remote_files_that_require_legacy_scaling : Optional[Dict[Path, Dict[str, Any]]]
         A dictionary of remote file full paths to their slot affine maps
+    remote_file_orientations : Optional[Dict[Path, Dict[str, Any]]]
+        A dictionary of remote file full paths to their slot orientations
 
     Returns
     -------
@@ -90,6 +93,7 @@ def parse_path(
             is_mpr=nifti_annotation.get("is_mpr", False),
             remote_file_path=remote_file_path,
             remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+            remote_file_orientations=remote_file_orientations,
         )
         annotation_files.append(annotation_file)
     return annotation_files
@@ -105,11 +109,13 @@ def _parse_nifti(
     is_mpr: bool,
     remote_file_path: Path,
     remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
+    remote_file_orientations: Dict[Path, Dict[str, Any]] = {},
 ) -> dt.AnnotationFile:
     img, pixdims = process_nifti(
         nib.load(nifti_path),
         remote_file_path=remote_file_path,
         remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+        remote_file_orientations=remote_file_orientations,
     )
 
     legacy = remote_file_path in remote_files_that_require_legacy_scaling
@@ -524,6 +530,7 @@ def process_nifti(
     ornt: Optional[List[List[float]]] = [[0.0, -1.0], [1.0, -1.0], [2.0, -1.0]],
     remote_file_path: Path = Path("/"),
     remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
+    remote_file_orientations: Dict[Path, Dict[str, Any]] = {},
 ) -> Tuple[np.ndarray, Tuple[float]]:
     """
     Converts a NifTI object of any orientation to the passed ornt orientation.
@@ -549,11 +556,14 @@ def process_nifti(
             The full path of the remote file
         remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]]
             A dictionary of remote file full paths to their slot affine maps
+        remote_file_orientations: Dict[Path, Dict[str, Any]]
+            A dictionary of remote file full paths to their slot orientations
 
     Returns:
         data_array: pixel array with orientation ornt.
         pixdims: tuple of nifti header zoom values.
     """
+
     img = correct_nifti_header_if_necessary(input_data)
     orig_ax_codes = nib.orientations.aff2axcodes(img.affine)
     orig_ornt = nib.orientations.axcodes2ornt(orig_ax_codes)
@@ -563,6 +573,12 @@ def process_nifti(
         affine = slot_affine_map[next(iter(slot_affine_map))]  # Take the 1st slot
         ax_codes = nib.orientations.aff2axcodes(affine)
         ornt = nib.orientations.axcodes2ornt(ax_codes)
+    remote_file_slot_orientations = remote_file_orientations.get(remote_file_path, {})
+    if remote_file_slot_orientations:
+        remote_ax_codes = remote_file_slot_orientations[
+            next(iter(remote_file_slot_orientations))
+        ]
+        ornt = nib.orientations.axcodes2ornt(remote_ax_codes)
     transform = nib.orientations.ornt_transform(orig_ornt, ornt)
     reoriented_img = img.as_reoriented(transform)
     data_array = reoriented_img.get_fdata()

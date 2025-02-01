@@ -875,7 +875,7 @@ class RemoteDatasetV2(RemoteDataset):
 
     def _get_remote_files_that_require_legacy_scaling(
         self,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
         Get all remote files that have been scaled upon upload. These files require that
         NifTI annotations are similarly scaled during import.
@@ -890,33 +890,47 @@ class RemoteDatasetV2(RemoteDataset):
 
         Returns
         -------
-        Dict[str, Dict[str, Any]]
-            A dictionary of remote file full paths to their slot affine maps
+        Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]
+            A tuple of dictionaries. The first is the remote file full paths to their slot affine maps.
+            The second is the remote file full paths to their slot orientations.
         """
         remote_files_that_require_legacy_scaling = {}
+        remote_file_orientations = {}
         remote_files = self.fetch_remote_files(
             filters={"statuses": ["new", "annotate", "review", "complete", "archived"]}
         )
         for remote_file in remote_files:
             if not remote_file.slots[0].get("metadata", {}).get("medical", {}):
                 continue
-            if not (
+            if (
                 remote_file.slots[0]
                 .get("metadata", {})
                 .get("medical", {})
                 .get("handler")
             ):
+                slot_orientations = {}
+                for slot in remote_file.slots:
+                    remote_orientation = slot["metadata"]["medical"]["raiCode"]
+                    if remote_orientation:
+                        slot_orientations[slot["slot_name"]] = remote_orientation
+                remote_file_orientations[Path(remote_file.full_path)] = (
+                    slot_orientations
+                )
+
+            else:
                 slot_affine_map = {}
                 for slot in remote_file.slots:
-                    slot_affine_map[slot["slot_name"]] = np.array(
-                        slot["metadata"]["medical"]["affine"],
-                        dtype=np.float64,
-                    )
+                    affine = slot["metadata"]["medical"]["affine"]
+                    if affine:
+                        slot_affine_map[slot["slot_name"]] = np.array(
+                            affine,
+                            dtype=np.float64,
+                        )
                 remote_files_that_require_legacy_scaling[
                     Path(remote_file.full_path)
                 ] = slot_affine_map
 
-        return remote_files_that_require_legacy_scaling
+        return remote_files_that_require_legacy_scaling, remote_file_orientations
 
 
 def _find_files_to_upload_as_multi_file_items(
