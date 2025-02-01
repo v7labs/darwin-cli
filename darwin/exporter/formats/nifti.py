@@ -35,7 +35,7 @@ except ImportError:
 import numpy as np
 
 import darwin.datatypes as dt
-from darwin.utils import convert_polygons_to_mask
+from darwin.utils import convert_polygons_to_mask, get_primary_plane_from_nifti
 
 
 class Plane(Enum):
@@ -54,6 +54,7 @@ class Volume:
     class_name: str
     series_instance_uid: str
     from_raster_layer: bool
+    primary_plane: str
 
 
 def export(
@@ -197,6 +198,10 @@ def build_output_volumes(
             class_names_to_export = [
                 ""
             ]  # If there are no annotations to export, we still need to create an empty volume
+
+        # Determine primary plane from affine matrix
+        primary_plane = get_primary_plane_from_nifti(affine)
+
         output_volumes[series_instance_uid] = {
             class_name: Volume(
                 pixel_array=np.zeros(volume_dims),
@@ -207,6 +212,7 @@ def build_output_volumes(
                 series_instance_uid=series_instance_uid,
                 class_name=class_name,
                 from_raster_layer=from_raster_layer,
+                primary_plane=primary_plane,
             )
             for class_name in class_names_to_export
         }
@@ -289,7 +295,7 @@ def update_pixel_array(
     volume: Dict,
     annotation_class_name: str,
     im_mask: np.ndarray,
-    plane: Plane,
+    primary_plane: str,
     frame_idx: int,
 ) -> Dict:
     """Updates the pixel array of the given volume with the given mask.
@@ -302,7 +308,7 @@ def update_pixel_array(
         Name of the annotation class
     im_mask : np.ndarray
         Mask to be added to the pixel array
-    plane : Plane
+    primary_plane : str
         Plane of the mask
     frame_idx : int
         Frame index of the mask
@@ -313,12 +319,12 @@ def update_pixel_array(
         Updated volume
     """
     plane_to_slice = {
-        Plane.XY: np.s_[:, :, frame_idx],
-        Plane.XZ: np.s_[:, frame_idx, :],
-        Plane.YZ: np.s_[frame_idx, :, :],
+        "AXIAL": np.s_[:, :, frame_idx],
+        "CORONAL": np.s_[:, frame_idx, :],
+        "SAGITTAL": np.s_[frame_idx, :, :],
     }
-    if plane in plane_to_slice:
-        slice_ = plane_to_slice[plane]
+    if primary_plane in plane_to_slice:
+        slice_ = plane_to_slice[primary_plane]
         volume[annotation_class_name].pixel_array[slice_] = np.logical_or(
             im_mask,
             volume[annotation_class_name].pixel_array[slice_],
@@ -358,22 +364,27 @@ def populate_output_volumes_from_polygons(
         frames = annotation.frames
 
         for frame_idx in frames.keys():
-            plane = get_plane_from_slot_name(
-                slot_name, slot.metadata.get("orientation")
-            )
+            primary_plane = volume[annotation.annotation_class.name].primary_plane
             dims = volume[annotation.annotation_class.name].dims
-            if plane == Plane.XY:
+            if primary_plane == "AXIAL":
                 height, width = dims[0], dims[1]
-            elif plane == Plane.XZ:
+            elif primary_plane == "CORONAL":
                 height, width = dims[0], dims[2]
-            elif plane == Plane.YZ:
+            elif primary_plane == "SAGITTAL":
                 height, width = dims[1], dims[2]
             pixdims = volume[annotation.annotation_class.name].pixdims
             frame_data = frames[frame_idx].data
             if "paths" in frame_data:
                 # Dealing with a complex polygon
                 polygons = [
-                    shift_polygon_coords(polygon_path, pixdims, legacy=legacy)
+                    shift_polygon_coords(
+                        polygon_path,
+                        pixdims,
+                        primary_plane=volume[
+                            annotation.annotation_class.name
+                        ].primary_plane,
+                        legacy=legacy,
+                    )
                     for polygon_path in frame_data["paths"]
                 ]
             else:
@@ -383,7 +394,7 @@ def populate_output_volumes_from_polygons(
                 output_volumes[series_instance_uid],
                 annotation.annotation_class.name,
                 im_mask,
-                plane,
+                primary_plane,
                 frame_idx,
             )
 
@@ -538,8 +549,17 @@ def _get_reoriented_nifti_image(
 
 
 def shift_polygon_coords(
-    polygon: List[Dict], pixdim: List[Number], legacy: bool = False
+    polygon: List[Dict],
+    pixdim: List[Number],
+    primary_plane: str,
+    legacy: bool = False,
 ) -> List:
+    if primary_plane == "AXIAL":
+        pixdim = [pixdim[0], pixdim[1]]
+    elif primary_plane == "CORONAL":
+        pixdim = [pixdim[0], pixdim[2]]
+    elif primary_plane == "SAGITTAL":
+        pixdim = [pixdim[1], pixdim[2]]
     if legacy:
         # Need to make it clear that we flip x/y because we need to take the transpose later.
         if pixdim[1] > pixdim[0]:
@@ -572,28 +592,6 @@ def get_view_idx(frame_idx: int, groups: List) -> int:
     for view_idx, group in enumerate(groups):
         if frame_idx in group:
             return view_idx
-
-
-def get_plane_from_slot_name(slot_name: str, orientation: Union[str, None]) -> Plane:
-    """Returns the plane from the given slot name and orientation.
-
-    Parameters
-    ----------
-    slot_name : str
-        Slot name
-    orientation : Union[str, None]
-        Orientation
-
-    Returns
-    -------
-    Plane
-        Enum representing the plane
-    """
-    if orientation is None:
-        orientation_dict = {"0.1": 0, "0.2": 1, "0.3": 2}
-        return Plane(orientation_dict.get(slot_name, 0))
-    orientation_dict = {"AXIAL": 0, "SAGITTAL": 1, "CORONAL": 2}
-    return Plane(orientation_dict.get(orientation, 0))
 
 
 def process_metadata(metadata: Dict) -> Tuple:

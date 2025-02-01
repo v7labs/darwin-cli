@@ -1643,3 +1643,37 @@ def convert_sequences_to_polygons(
             path.append({"x": x, "y": y})
         polygons.append(path)
     return {"path": polygons}
+
+
+def get_primary_plane_from_nifti(affine: np.ndarray) -> str:
+    """
+    Determine the primary orientation of a NIfTI image from its affine matrix.
+
+    Parameters
+    ----------
+    affine : numpy.ndarray
+        4x4 affine matrix from NIfTI file
+
+    Returns
+    -------
+    str
+        The primary anatomical plane - 'AXIAL', 'SAGITTAL', or 'CORONAL'
+    """
+    # Extract the rotation/scaling matrix (first 3x3 elements)
+    rotation_scale = affine[:3, :3]
+
+    # Get absolute values to determine magnitude of each direction
+    abs_rotation = np.abs(rotation_scale)
+
+    # Find which axis has the largest magnitude for each dimension
+    primary_directions = np.argmax(abs_rotation, axis=1)
+
+    # Find which dimension has the largest overall magnitude
+    magnitudes = [abs_rotation[i, primary_directions[i]] for i in range(3)]
+    primary_plane = np.argmax(magnitudes)
+    if primary_plane == 0:
+        return "SAGITTAL"
+    elif primary_plane == 1:
+        return "CORONAL"
+    else:
+        return "AXIAL"
