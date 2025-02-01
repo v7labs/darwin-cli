@@ -6,11 +6,11 @@ import zlib
 from logging import Logger
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Union, cast
-
+from requests.exceptions import HTTPError
 import requests
 from requests import Response
 from requests.adapters import HTTPAdapter
-
+from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential_jitter
 from darwin.backend_v2 import BackendV2
 from darwin.config import Config
 from darwin.dataset.identifier import DatasetIdentifier
@@ -51,6 +51,23 @@ from darwin.utils import (
     urljoin,
 )
 from darwin.utils.get_item_count import get_item_count
+
+INITIAL_WAIT = 60
+MAX_WAIT = 300
+MAX_RETRIES = 10
+
+
+def log_rate_limit_exceeded(retry_state: RetryCallState):
+    wait_time = retry_state.next_action.sleep
+    print(f"Rate limit exceeded. Retrying in {wait_time:.2f} seconds...")
+
+
+def retry_if_status_code_429(retry_state: RetryCallState):
+    exception = retry_state.outcome.exception()
+    if isinstance(exception, HTTPError):
+        response: Response = exception.response
+        return response.status_code == 429
+    return False
 
 
 class Client:
@@ -742,6 +759,12 @@ class Client:
         headers["User-Agent"] = f"darwin-py/{__version__}"
         return headers
 
+    @retry(
+        wait=wait_exponential_jitter(initial=INITIAL_WAIT, max=MAX_WAIT),
+        stop=stop_after_attempt(MAX_RETRIES),
+        retry=retry_if_status_code_429,
+        before_sleep=log_rate_limit_exceeded,
+    )
     def _get_raw_from_full_url(
         self,
         url: str,
@@ -789,6 +812,12 @@ class Client:
         response = self._get_raw(endpoint, team_slug, retry)
         return self._decode_response(response)
 
+    @retry(
+        wait=wait_exponential_jitter(initial=INITIAL_WAIT, max=MAX_WAIT),
+        stop=stop_after_attempt(MAX_RETRIES),
+        retry=retry_if_status_code_429,
+        before_sleep=log_rate_limit_exceeded,
+    )
     def _put_raw(
         self,
         endpoint: str,
@@ -829,6 +858,12 @@ class Client:
         response: Response = self._put_raw(endpoint, payload, team_slug, retry)
         return self._decode_response(response)
 
+    @retry(
+        wait=wait_exponential_jitter(initial=INITIAL_WAIT, max=MAX_WAIT),
+        stop=stop_after_attempt(MAX_RETRIES),
+        retry=retry_if_status_code_429,
+        before_sleep=log_rate_limit_exceeded,
+    )
     def _post_raw(
         self,
         endpoint: str,
@@ -887,6 +922,12 @@ class Client:
         response: Response = self._post_raw(endpoint, payload, team_slug, retry)
         return self._decode_response(response)
 
+    @retry(
+        wait=wait_exponential_jitter(initial=INITIAL_WAIT, max=MAX_WAIT),
+        stop=stop_after_attempt(MAX_RETRIES),
+        retry=retry_if_status_code_429,
+        before_sleep=log_rate_limit_exceeded,
+    )
     def _delete(
         self,
         endpoint: str,

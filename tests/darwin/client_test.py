@@ -15,6 +15,12 @@ from darwin.future.tests.core.fixtures import *  # noqa: F401, F403
 from tests.fixtures import *  # noqa: F401, F403
 
 
+from unittest.mock import Mock, patch
+from requests import Response, HTTPError
+from darwin.client import MAX_RETRIES
+from tenacity import RetryError
+
+
 @pytest.fixture
 def darwin_client(
     darwin_config_path: Path, darwin_datasets_path: Path, team_slug_darwin_json_v2: str
@@ -557,3 +563,120 @@ class TestListExternalStorageConnections:
         assert actual_storages[1].readonly == expected_storage_2.readonly
         assert actual_storages[1].provider == expected_storage_2.provider
         assert actual_storages[1].default == expected_storage_2.default
+
+
+class TestClientRetry:
+    @pytest.fixture
+    def mock_config(self):
+        config = Mock(spec=Config)
+
+        # Set up the mock to return different values based on the key
+        def get_side_effect(key, default=None):
+            if key == "global/api_endpoint":
+                return "https://darwin.v7labs.com/api/"
+            if key == "global/payload_compression_level":
+                return "0"
+            return default
+
+        config.get.side_effect = get_side_effect
+        config.get_team.return_value = Mock(api_key="test-key", slug="test-team")
+        return config
+
+    @pytest.fixture
+    def client(self, mock_config):
+        return Client(config=mock_config, default_team="test-team")
+
+    @patch("time.sleep", return_value=None)
+    def test_get_retries_on_429(self, mock_sleep, client):
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+
+        with patch("requests.Session.get") as mock_get:
+            mock_get.return_value = mock_response
+
+            with pytest.raises(RetryError):
+                client._get("/test-endpoint")
+
+            assert mock_get.call_count == MAX_RETRIES
+
+    @patch("time.sleep", return_value=None)
+    def test_post_retries_on_429(self, mock_sleep, client):
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = mock_response
+
+            with pytest.raises(RetryError):
+                client._post("/test-endpoint", {"test": "data"})
+
+            assert mock_post.call_count == MAX_RETRIES
+
+    @patch("time.sleep", return_value=None)
+    def test_put_retries_on_429(self, mock_sleep, client):
+        # Create a mock response that simulates a 429 status
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+
+        with patch("requests.Session.put") as mock_put:
+            mock_put.return_value = mock_response
+
+            with pytest.raises(RetryError):
+                client._put("/test-endpoint", {"test": "data"})
+
+            assert mock_put.call_count == MAX_RETRIES
+
+    @patch("time.sleep", return_value=None)
+    def test_request_succeeds_after_retries(self, mock_sleep, client):
+        mock_429_response = Mock(spec=Response)
+        mock_429_response.status_code = 429
+        mock_429_response.headers = {}
+
+        mock_success_response = Mock(spec=Response)
+        mock_success_response.status_code = 200
+        mock_success_response.json.return_value = {"success": True}
+        mock_success_response.headers = {}
+
+        with patch("requests.Session.get") as mock_get:
+            mock_get.side_effect = [
+                HTTPError(response=mock_429_response),
+                HTTPError(response=mock_429_response),
+                mock_success_response,
+            ]
+
+            result = client._get("/test-endpoint")
+
+            assert result == {"success": True}
+            assert mock_get.call_count == 3
+
+    def test_no_retry_on_other_errors(self, client):
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 404
+
+        with patch("requests.Session.get") as mock_get:
+            mock_get.side_effect = HTTPError(response=mock_response)
+
+            with pytest.raises(HTTPError):
+                client._get("/test-endpoint")
+
+            assert mock_get.call_count == 1
+
+    @patch("time.sleep", return_value=None)
+    def test_retry_respects_rate_limit_headers(self, mock_sleep, client):
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 429
+
+        with patch("requests.Session.get") as mock_get:
+            mock_get.side_effect = HTTPError(response=mock_response)
+
+            with pytest.raises(RetryError):
+                client._get("/test-endpoint")
+
+            assert mock_get.call_count == MAX_RETRIES
+            assert mock_sleep.called
