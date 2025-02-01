@@ -1586,6 +1586,7 @@ def _handle_subs(
     data: dt.DictFreeForm,
     annotation_class_id: str,
     attributes: Dict[str, dt.UnknownType],
+    include_empty_attributes: Optional[bool] = False,
 ) -> dt.DictFreeForm:
     for sub in annotation.subs:
         if sub.annotation_type == "text":
@@ -1608,6 +1609,9 @@ def _handle_subs(
             data["instance_id"] = {"value": sub.data}
         else:
             data[sub.annotation_type] = sub.data
+
+    if not data.get("attributes") and include_empty_attributes:
+        data["attributes"] = {"attributes": []}
 
     return data
 
@@ -1707,6 +1711,7 @@ def _get_annotation_data(
                 _format_polygon_for_import(annotation, data),
                 annotation_class_id,
                 attributes,
+                include_empty_attributes=True,
             ),
         )
     else:
