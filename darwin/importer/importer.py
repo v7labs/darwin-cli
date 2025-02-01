@@ -20,7 +20,7 @@ from typing import (
     Tuple,
     Union,
 )
-
+import numpy as np
 
 from darwin.datatypes import (
     AnnotationFile,
@@ -71,6 +71,11 @@ UNSUPPORTED_CLASSES = ["string", "graph"]
 # Classes that are defined on team level automatically and available in all datasets
 GLOBAL_CLASSES = ["__raster_layer__"]
 
+# Add a length of 5 for URL encoding overhead and separators per filename
+FILENAME_OVERHEAD = 5
+MAX_URL_LENGTH = 2000
+BASE_URL_LENGTH = 200
+
 DEPRECATION_MESSAGE = """
 
 This function is going to be turned into private. This means that breaking
@@ -117,7 +122,9 @@ def _find_and_parse(  # noqa: C901
     console: Optional[Console] = None,
     use_multi_cpu: bool = True,
     cpu_limit: int = 1,
-    remote_files_that_require_legacy_scaling: Optional[List[Path]] = None,
+    remote_files_that_require_legacy_scaling: Optional[
+        Dict[str, Dict[str, Any]]
+    ] = None,
 ) -> Optional[Iterable[dt.AnnotationFile]]:
     is_console = console is not None
 
@@ -185,6 +192,9 @@ def _find_and_parse(  # noqa: C901
     maybe_console("Finished.")
     # Sometimes we have a list of lists of AnnotationFile, sometimes we have a list of AnnotationFile
     # We flatten the list of lists
+    if not parsed_files:
+        return None
+
     if isinstance(parsed_files, list):
         if isinstance(parsed_files[0], list):
             parsed_files = [item for sublist in parsed_files for item in sublist]
@@ -1252,21 +1262,34 @@ def import_annotations(  # noqa: C901
     console.print("Retrieving local annotations ...", style="info")
     local_files = []
     local_files_missing_remotely = []
+
+    remote_files_targeted_by_import = _get_remote_files_targeted_by_import(
+        importer, file_paths, dataset, console, use_multi_cpu, cpu_limit
+    )
+    (
+        remote_files_that_require_legacy_nifti_scaling,
+        remote_files_that_require_pixel_to_mm_transform,
+    ) = _get_remote_medical_file_transform_requirements(remote_files_targeted_by_import)
+
     if importer.__module__ == "darwin.importer.formats.nifti":
-        remote_files_that_require_legacy_scaling = (
-            dataset._get_remote_files_that_require_legacy_scaling()
-        )
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
             importer,
             file_paths,
             console,
             use_multi_cpu,
             cpu_limit,
-            remote_files_that_require_legacy_scaling,
+            remote_files_that_require_legacy_nifti_scaling,
         )
     else:
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
-            importer, file_paths, console, use_multi_cpu, cpu_limit
+            importer,
+            file_paths,
+            console,
+            use_multi_cpu,
+            cpu_limit,
+        )
+        maybe_parsed_files = _scale_coordinates_by_pixdims(
+            maybe_parsed_files, remote_files_that_require_pixel_to_mm_transform
         )
 
     if not maybe_parsed_files:
@@ -2312,3 +2335,196 @@ def _split_payloads(
         payloads.append(current_payload)
 
     return payloads
+
+
+def _get_remote_files_targeted_by_import(
+    importer: Callable[[Path], Union[List[dt.AnnotationFile], dt.AnnotationFile, None]],
+    file_paths: List[PathLike],
+    dataset: "RemoteDataset",
+    console: Optional[Console] = None,
+    use_multi_cpu: bool = True,
+    cpu_limit: int = 1,
+) -> List[DatasetItem]:
+    """
+    Parses local annotations files for import and returns a list of remote dataset items
+    targeted by the import. Handles chunking of requests if there are many files to
+    avoid URL length issues.
+
+    Parameters
+    ----------
+    importer: Callable[[Path], Union[List[dt.AnnotationFile], dt.AnnotationFile, None]]
+        The importer used to parse local annotation files
+    file_paths: List[PathLike]
+        A list of local annotation files to be uploaded
+    dataset: RemoteDataset
+        The remote dataset to fetch files from
+    console: Optional[Console]
+        The console object
+    use_multi_cpu: bool
+        Whether to use multi-CPU processing
+    cpu_limit: int
+        The number of CPUs to use for processing
+
+    Returns
+    -------
+    List[DatasetItem]
+        A list of remote dataset items targeted by the import
+
+    Raises
+    ------
+    ValueError
+        If no files could be parsed or if the URL becomes too long even with minimum chunk size
+    """
+    maybe_parsed_files = _find_and_parse(
+        importer, file_paths, console, use_multi_cpu, cpu_limit
+    )
+    if not maybe_parsed_files:
+        raise ValueError("Not able to parse any files.")
+
+    remote_filenames = list({file.filename for file in maybe_parsed_files})
+    remote_filepaths = [file.full_path for file in maybe_parsed_files]
+
+    all_remote_files: List[DatasetItem] = []
+    current_chunk: List[str] = []
+    current_length = BASE_URL_LENGTH
+    max_chunk_length = MAX_URL_LENGTH - BASE_URL_LENGTH
+
+    for filename in remote_filenames:
+        filename_length = len(filename) + FILENAME_OVERHEAD
+        if current_length + filename_length > max_chunk_length and current_chunk:
+            remote_files = dataset.fetch_remote_files(
+                filters={"item_names": current_chunk}
+            )
+            all_remote_files.extend(remote_files)
+            current_chunk = []
+            current_length = BASE_URL_LENGTH
+
+        current_chunk.append(filename)
+        current_length += filename_length
+
+    if current_chunk:
+        remote_files = dataset.fetch_remote_files(filters={"item_names": current_chunk})
+        all_remote_files.extend(remote_files)
+
+    return [
+        remote_file
+        for remote_file in all_remote_files
+        if remote_file.full_path in remote_filepaths
+    ]
+
+
+def _get_remote_medical_file_transform_requirements(
+    remote_files_targeted_by_import: List[DatasetItem],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[str]]]:
+    """
+    This function parses the remote files targeted by the import. If the remote file is
+    a medical file, it checks if it requires legacy NifTI scaling or a pixel to mm transform.
+
+    If the file requires a pixel to mm transform, it select the correct pixdims values
+    based on the axis of acquisition.
+
+    Parameters
+    ----------
+    remote_files_targeted_by_import: List[DatasetItem]
+        The remote files targeted by the import
+
+    Returns
+    -------
+    Tuple[Dict[str, Dict[Path, Any]], Dict[Path, Any]]
+        A tuple of 2 dictionaries:
+        - remote_files_that_require_legacy_nifti_scaling: A dictionary of remote files
+        that require legacy NifTI scaling and the slot name to affine matrix mapping
+        - remote_files_that_require_pixel_to_mm_transform: A dictionary of remote files
+        that require a pixel to mm transform and the pixdims of the (x, y) axes
+    """
+    remote_files_that_require_legacy_nifti_scaling = {}
+    remote_files_that_require_pixel_to_mm_transform = {}
+    for remote_file in remote_files_targeted_by_import:
+        if not remote_file.slots:
+            continue
+        slot_pixdim_map = {}
+        slot_affine_map = {}
+        for slot in remote_file.slots:
+            if not slot_is_medical(slot):
+                continue
+            if slot_is_handled_by_monai(slot):
+                slot_name = slot["slot_name"]
+                primary_plane = slot["metadata"]["medical"]["plane_map"][slot_name]
+                pixdims = slot["metadata"]["medical"]["pixdims"]
+                if primary_plane == "AXIAL":
+                    pixdims = [pixdims[0], pixdims[1]]
+                elif primary_plane == "CORONAL":
+                    pixdims = [pixdims[0], pixdims[2]]
+                elif primary_plane == "SAGITTAL":
+                    pixdims = [pixdims[1], pixdims[2]]
+                slot_pixdim_map[slot_name] = pixdims
+            else:
+                slot_affine_map[slot["slot_name"]] = np.array(
+                    slot["metadata"]["medical"]["affine"], dtype=np.float64
+                )
+        if slot_pixdim_map:
+            remote_files_that_require_pixel_to_mm_transform[remote_file.full_path] = (
+                slot_pixdim_map
+            )
+        if slot_affine_map:
+            remote_files_that_require_legacy_nifti_scaling[remote_file.full_path] = (
+                slot_affine_map
+            )
+
+    return (
+        remote_files_that_require_legacy_nifti_scaling,
+        remote_files_that_require_pixel_to_mm_transform,
+    )
+
+
+def _scale_coordinates_by_pixdims(
+    maybe_parsed_files: List[dt.AnnotationFile],
+    remote_files_that_require_pixel_to_mm_transform: Dict[Path, Any],
+) -> List[dt.AnnotationFile]:
+    """
+    This function scales coordinates by the pixdims of the (x, y) axes.
+
+    Parameters
+    ----------
+    maybe_parsed_files: List[dt.AnnotationFile]
+        The parsed annotation files
+    remote_files_that_require_pixel_to_mm_transform: Dict[Path, Any]
+        The remote files that require a pixel to mm transform
+
+    Returns
+    -------
+    List[dt.AnnotationFile]
+        The parsed annotation files with coordinates scaled by the pixdims of the (x, y) axes
+    """
+    if not remote_files_that_require_pixel_to_mm_transform:
+        return maybe_parsed_files
+    for file in maybe_parsed_files:
+        if file.full_path in remote_files_that_require_pixel_to_mm_transform:
+            for annotation in file.annotations:
+                slot_name = annotation.slot_names[0]
+                if (
+                    slot_name
+                    not in remote_files_that_require_pixel_to_mm_transform[
+                        file.full_path
+                    ]
+                ):
+                    continue
+                pixdims = remote_files_that_require_pixel_to_mm_transform[
+                    file.full_path
+                ][slot_name]
+                if isinstance(annotation, dt.VideoAnnotation):
+                    for _, frame_annotation in annotation.frames.items():
+                        frame_annotation.scale_coordinates(
+                            float(pixdims[0]), float(pixdims[1])
+                        )
+                elif isinstance(annotation, dt.Annotation):
+                    annotation.scale_coordinates(float(pixdims[0]), float(pixdims[1]))
+    return maybe_parsed_files
+
+
+def slot_is_medical(slot: Dict[str, Any]) -> bool:
+    return slot.get("metadata", {}).get("medical") is not None
+
+
+def slot_is_handled_by_monai(slot: Dict[str, Any]) -> bool:
+    return slot.get("metadata", {}).get("medical", {}).get("handler") == "MONAI"

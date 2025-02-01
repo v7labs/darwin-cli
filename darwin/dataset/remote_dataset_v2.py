@@ -11,7 +11,6 @@ from typing import (
     Tuple,
     Union,
 )
-import numpy as np
 from pydantic import ValidationError
 from requests.models import Response
 
@@ -872,51 +871,6 @@ class RemoteDatasetV2(RemoteDataset):
                 print(f"  - {item}")
         print(f"Reistration complete. Check your items in the dataset: {self.slug}")
         return results
-
-    def _get_remote_files_that_require_legacy_scaling(
-        self,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all remote files that have been scaled upon upload. These files require that
-        NifTI annotations are similarly scaled during import.
-
-        The in-platform affines are returned for each legacy file, as this is required
-        to properly re-orient the annotations during import.
-
-        Parameters
-        ----------
-        dataset : RemoteDataset
-            The remote dataset to get the files from
-
-        Returns
-        -------
-        Dict[str, Dict[str, Any]]
-            A dictionary of remote file full paths to their slot affine maps
-        """
-        remote_files_that_require_legacy_scaling = {}
-        remote_files = self.fetch_remote_files(
-            filters={"statuses": ["new", "annotate", "review", "complete", "archived"]}
-        )
-        for remote_file in remote_files:
-            if not remote_file.slots[0].get("metadata", {}).get("medical", {}):
-                continue
-            if not (
-                remote_file.slots[0]
-                .get("metadata", {})
-                .get("medical", {})
-                .get("handler")
-            ):
-                slot_affine_map = {}
-                for slot in remote_file.slots:
-                    slot_affine_map[slot["slot_name"]] = np.array(
-                        slot["metadata"]["medical"]["affine"],
-                        dtype=np.float64,
-                    )
-                remote_files_that_require_legacy_scaling[
-                    Path(remote_file.full_path)
-                ] = slot_affine_map
-
-        return remote_files_that_require_legacy_scaling
 
 
 def _find_files_to_upload_as_multi_file_items(

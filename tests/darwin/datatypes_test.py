@@ -15,6 +15,8 @@ from darwin.datatypes import (
     make_polygon,
     parse_property_classes,
     split_paths_by_metadata,
+    Annotation,
+    AnnotationClass,
 )
 
 
@@ -188,3 +190,116 @@ class TestObjectStore:
             repr(object_store)
             == "ObjectStore(name=test, prefix=test_prefix, readonly=False, provider=aws)"
         )
+
+
+class TestAnnotation:
+    def test_scale_coordinates_bounding_box(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_bb", "bounding_box"),
+            data={"x": 10, "y": 20, "w": 30, "h": 40},
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {"x": 20, "y": 30, "w": 60, "h": 60}
+
+    def test_scale_coordinates_polygon(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_polygon", "polygon"),
+            data={
+                "paths": [
+                    [
+                        {"x": 0, "y": 0},
+                        {"x": 100, "y": 0},
+                        {"x": 100, "y": 100},
+                        {"x": 0, "y": 100},
+                        {"x": 0, "y": 0},
+                    ],
+                    [
+                        {"x": 100, "y": 0},
+                        {"x": 200, "y": 0},
+                        {"x": 200, "y": 100},
+                        {"x": 100, "y": 100},
+                        {"x": 100, "y": 0},
+                    ],
+                ]
+            },
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {
+            "paths": [
+                [
+                    {"x": 0, "y": 0},
+                    {"x": 200, "y": 0},
+                    {"x": 200, "y": 150},
+                    {"x": 0, "y": 150},
+                    {"x": 0, "y": 0},
+                ],
+                [
+                    {"x": 200, "y": 0},
+                    {"x": 400, "y": 0},
+                    {"x": 400, "y": 150},
+                    {"x": 200, "y": 150},
+                    {"x": 200, "y": 0},
+                ],
+            ]
+        }
+
+    def test_scale_coordinates_ellipse(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_ellipse", "ellipse"),
+            data={
+                "center": {"x": 0, "y": 0},
+                "radius": {"x": 100, "y": 50},
+            },
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {
+            "center": {"x": 0, "y": 0},
+            "radius": {"x": 200, "y": 75},
+        }
+
+    def test_scale_coordinates_line(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_line", "line"),
+            data={"path": [{"x": 0, "y": 0}, {"x": 100, "y": 100}]},
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {"path": [{"x": 0, "y": 0}, {"x": 200, "y": 150}]}
+
+    def test_scale_coordinates_keypoint(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_keypoint", "keypoint"),
+            data={"x": 50, "y": 100},
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {"x": 100, "y": 150}
+
+    def test_scale_coordinates_skeleton(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_skeleton", "skeleton"),
+            data={
+                "nodes": [
+                    {"x": 0, "y": 0},
+                    {"x": 100, "y": 100},
+                ]
+            },
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {"nodes": [{"x": 0, "y": 0}, {"x": 200, "y": 150}]}
+
+    def test_scale_coordinates_skips_raster_layer(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("__raster_layer__", "raster_layer"),
+            data={"dense_rle": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]},
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {
+            "dense_rle": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        }
+
+    def test_scale_coordinates_skips_tag(self):
+        annotation = Annotation(
+            annotation_class=AnnotationClass("test_tag", "tag"),
+            data={},
+        )
+        annotation.scale_coordinates(x_scale=2, y_scale=1.5)
+        assert annotation.data == {}

@@ -1,7 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 from unittest.mock import MagicMock, Mock, _patch, patch
 from zipfile import ZipFile
 
@@ -11,7 +11,9 @@ from darwin.future.data_objects.properties import (
     FullProperty,
     PropertyValue,
 )
+from darwin.item import DatasetItem
 import pytest
+import numpy as np
 from darwin import datatypes as dt
 from darwin.importer import get_importer
 from darwin.importer.importer import (
@@ -34,6 +36,27 @@ from darwin.importer.importer import (
     _warn_for_annotations_with_multiple_instance_ids,
     _serialize_item_level_properties,
     _split_payloads,
+    _get_remote_files_targeted_by_import,
+    _get_remote_medical_file_transform_requirements,
+    _scale_coordinates_by_pixdims,
+    slot_is_medical,
+    slot_is_handled_by_monai,
+    MAX_URL_LENGTH,
+    BASE_URL_LENGTH,
+)
+from darwin.exceptions import RequestEntitySizeExceeded
+from darwin.datatypes import (
+    AnnotationFile,
+    make_bounding_box,
+    make_polygon,
+    make_ellipse,
+    make_line,
+    make_keypoint,
+    make_skeleton,
+    make_video_annotation,
+    make_tag,
+    make_mask,
+    make_raster_layer,
 )
 
 
@@ -143,6 +166,200 @@ def setup_data(request, multiple_annotations=False):
             )
         )
     return client, team_slug, annotation_class_ids_map, annotations
+
+
+def make_all_image_annotations_test(slot_name: str) -> List[dt.Annotation]:
+    """
+    Create sample image annotations of all types for a given slot name
+    """
+    image_annotations: List[dt.Annotation] = []
+    image_annotations.append(
+        make_bounding_box("bbox_class", x=10, y=20, w=30, h=40, slot_names=[slot_name])
+    )
+    image_annotations.append(
+        make_polygon(
+            "poly_class", [[{"x": 1, "y": 2}, {"x": 3, "y": 4}]], slot_names=[slot_name]
+        )
+    )
+    image_annotations.append(
+        make_ellipse(
+            "ellipse_class",
+            {"center": {"x": 5, "y": 6}, "radius": {"x": 7, "y": 8}, "angle": 0},
+            slot_names=[slot_name],
+        )
+    )
+    image_annotations.append(
+        make_line(
+            "line_class",
+            [{"x": 9, "y": 10}, {"x": 11, "y": 12}],
+            slot_names=[slot_name],
+        )
+    )
+    image_annotations.append(
+        make_keypoint("point_class", x=13, y=14, slot_names=[slot_name])
+    )
+    image_annotations.append(
+        make_skeleton(
+            "skeleton_class",
+            [{"name": "node1", "x": 15, "y": 16}],
+            slot_names=[slot_name],
+        )
+    )
+    image_annotations.append(make_tag("tag_class", slot_names=[slot_name]))
+    image_annotations.append(make_mask("mask_class", slot_names=[slot_name]))
+    image_annotations.append(
+        make_raster_layer(
+            "raster_layer_class", {}, 100, [1, 2, 3, 4, 5], slot_names=[slot_name]
+        )
+    )
+    return image_annotations
+
+
+def make_all_video_annotations_test(slot_name: str) -> List[dt.VideoAnnotation]:
+    """
+    Create sample video annotations of all types for a given slot name
+    """
+
+    video_annotations: List[dt.VideoAnnotation] = []
+    start_frame = 0
+    end_frame = 10
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_bounding_box(
+                    "bbox_class", x=10, y=20, w=30, h=40, slot_names=[slot_name]
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_polygon(
+                    "poly_class",
+                    [[{"x": 1, "y": 2}, {"x": 3, "y": 4}]],
+                    slot_names=[slot_name],
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_ellipse(
+                    "ellipse_class",
+                    {
+                        "center": {"x": 5, "y": 6},
+                        "radius": {"x": 7, "y": 8},
+                        "angle": 0,
+                    },
+                    slot_names=[slot_name],
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_line(
+                    "line_class",
+                    [{"x": 9, "y": 10}, {"x": 11, "y": 12}],
+                    slot_names=[slot_name],
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_keypoint("point_class", x=13, y=14, slot_names=[slot_name])
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_skeleton(
+                    "skeleton_class",
+                    [{"name": "node1", "x": 15, "y": 16}],
+                    slot_names=[slot_name],
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_tag("tag_class", slot_names=[slot_name])
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_mask("mask_class", slot_names=[slot_name])
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    video_annotations.append(
+        make_video_annotation(
+            frames={
+                i: make_raster_layer(
+                    "raster_layer_class",
+                    {},
+                    100,
+                    [1, 2, 3, 4, 5],
+                    slot_names=[slot_name],
+                )
+                for i in range(start_frame, end_frame)
+            },
+            keyframes={i: True for i in range(start_frame, end_frame)},
+            segments=[],
+            interpolated=False,
+            slot_names=[slot_name],
+        )
+    )
+    return video_annotations
 
 
 def root_path(x: str) -> str:
@@ -1434,12 +1651,72 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
                 ),
-                ({}, {}),
+                (
+                    {},
+                    {
+                        "prop1": FullProperty(
+                            name="prop1",
+                            type="single_select",
+                            description="",
+                            required=True,
+                            slug="test_team",
+                            dataset_ids=[],
+                            granularity=PropertyGranularity("item"),
+                            property_values=[
+                                PropertyValue(type="string", value="1"),
+                                PropertyValue(type="string", value="2"),
+                            ],
+                        ),
+                        "prop2": FullProperty(
+                            name="prop2",
+                            type="multi_select",
+                            description="",
+                            required=False,
+                            slug="test_team",
+                            dataset_ids=[],
+                            granularity=PropertyGranularity("item"),
+                            property_values=[
+                                PropertyValue(type="string", value="1"),
+                                PropertyValue(type="string", value="2"),
+                            ],
+                        ),
+                    },
+                ),
+                (
+                    {},
+                    {
+                        "prop1": FullProperty(
+                            name="prop1",
+                            type="single_select",
+                            description="",
+                            required=True,
+                            slug="test_team",
+                            dataset_ids=[],
+                            granularity=PropertyGranularity("item"),
+                            property_values=[
+                                PropertyValue(type="string", value="1"),
+                                PropertyValue(type="string", value="2"),
+                            ],
+                        ),
+                        "prop2": FullProperty(
+                            name="prop2",
+                            type="multi_select",
+                            description="",
+                            required=False,
+                            slug="test_team",
+                            dataset_ids=[],
+                            granularity=PropertyGranularity("item"),
+                            property_values=[
+                                PropertyValue(type="string", value="1"),
+                                PropertyValue(type="string", value="2"),
+                            ],
+                        ),
+                    },
+                ),
             ]
             mock_create_update_props.side_effect = _create_update_item_properties
 
@@ -1795,7 +2072,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -1827,7 +2103,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -1942,7 +2217,6 @@ class TestImportItemLevelProperties:
                             granularity=PropertyGranularity("item"),
                             property_values=[
                                 PropertyValue(type="string", value="1"),
-                                PropertyValue(type="string", value="2"),
                             ],
                         ),
                     },
@@ -2005,7 +2279,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -3615,3 +3888,430 @@ def test__split_payloads_overwrites_on_first_payload_and_appends_on_the_rest():
     assert result[0]["overwrite"]
     assert not result[1]["overwrite"]
     assert not result[2]["overwrite"]
+
+
+def test__get_remote_files_targeted_by_import_success() -> None:
+    """Test successful case where files are found remotely."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    # Mock the remote files that will be returned
+    mock_remote_file1 = Mock(full_path="/path/to/file1.json")
+    mock_remote_file2 = Mock(full_path="/path/to/file2.json")
+
+    mock_dataset.fetch_remote_files.return_value = [
+        mock_remote_file1,
+        mock_remote_file2,
+    ]
+
+    def mock_importer(path: Path) -> List[dt.AnnotationFile]:
+        file_num = int(path.stem.replace("file", ""))
+        mock_file = Mock(
+            spec=dt.AnnotationFile,
+            filename=f"file{file_num}.json",
+            full_path=f"/path/to/file{file_num}.json",
+        )
+        return [mock_file]
+
+    result = _get_remote_files_targeted_by_import(
+        importer=mock_importer,
+        file_paths=[Path("file1.json"), Path("file2.json")],
+        dataset=mock_dataset,
+        console=mock_console,
+    )
+
+    assert len(result) == 2
+    assert result[0] == mock_remote_file1
+    assert result[1] == mock_remote_file2
+    mock_dataset.fetch_remote_files.assert_called_once()
+
+
+def test__get_remote_files_targeted_by_import_no_files_parsed() -> None:
+    """Test error case when no files can be parsed."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    def mock_importer(path: Path) -> Optional[List[dt.AnnotationFile]]:
+        return None
+
+    with pytest.raises(ValueError, match="Not able to parse any files."):
+        _get_remote_files_targeted_by_import(
+            importer=mock_importer,
+            file_paths=[Path("file1.json")],
+            dataset=mock_dataset,
+            console=mock_console,
+        )
+
+
+def test__get_remote_files_targeted_by_import_url_too_long() -> None:
+    """Test that files that would cause URL length to exceed limits are handled appropriately."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    # Create a filename that would exceed the max URL length by itself
+    very_long_filename = "a" * (MAX_URL_LENGTH - BASE_URL_LENGTH + 10) + ".json"
+
+    def mock_importer(path: Path) -> List[dt.AnnotationFile]:
+        mock_file = Mock(
+            spec=dt.AnnotationFile,
+            filename=very_long_filename,
+            full_path=f"/path/to/{very_long_filename}",
+        )
+        return [mock_file]
+
+    mock_dataset.fetch_remote_files.side_effect = RequestEntitySizeExceeded()
+
+    with pytest.raises(RequestEntitySizeExceeded):
+        _get_remote_files_targeted_by_import(
+            importer=mock_importer,
+            file_paths=[Path("file1.json")],
+            dataset=mock_dataset,
+            console=mock_console,
+        )
+
+    # Verify fetch_remote_files was called with just the one filename
+    mock_dataset.fetch_remote_files.assert_called_once_with(
+        filters={"item_names": [very_long_filename]}
+    )
+
+
+def test__get_remote_medical_file_transform_requirements_empty_list():
+    """Test that empty input list returns empty dictionaries"""
+    remote_files: List[DatasetItem] = []
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {}
+
+
+def test__get_remote_medical_file_transform_requirements_no_slots():
+    """Test that files with no slots are handled correctly"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = None
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {}
+
+
+def test__get_remote_medical_file_transform_requirements_non_medical_slots():
+    """Test that files with non-medical slots are handled correctly"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [{"slot_name": "slot1", "metadata": {}}]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {}
+
+
+def test__get_remote_medical_file_transform_requirements_monai_axial():
+    """Test MONAI-handled medical slots with AXIAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "AXIAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {"/path/to/file": {"slot1": [1.0, 2.0]}}
+
+
+def test__get_remote_medical_file_transform_requirements_monai_coronal():
+    """Test MONAI-handled medical slots with CORONAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "CORONAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {"/path/to/file": {"slot1": [1.0, 3.0]}}
+
+
+def test__get_remote_medical_file_transform_requirements_monai_saggital():
+    """Test MONAI-handled medical slots with SAGGITAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "SAGITTAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert legacy_scaling == {}
+    assert pixel_transform == {"/path/to/file": {"slot1": [2.0, 3.0]}}
+
+
+def test__get_remote_medical_file_transform_requirements_legacy_nifti():
+    """Test legacy NifTI scaling"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+    assert pixel_transform == {}
+    assert "/path/to/file" in legacy_scaling
+    assert "slot1" in legacy_scaling["/path/to/file"]
+    assert legacy_scaling["/path/to/file"]["slot1"].shape == (4, 4)
+    assert (
+        legacy_scaling["/path/to/file"]["slot1"]
+        == np.array(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
+        )
+    ).all()
+
+
+def test__get_remote_medical_file_transform_requirements_mixed():
+    """Test mixed case with both MONAI and legacy NifTI files"""
+    mock_file1 = MagicMock(spec=DatasetItem)
+    mock_file1.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "AXIAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file1.full_path = "/path/to/file1"
+
+    mock_file2 = MagicMock(spec=DatasetItem)
+    mock_file2.slots = [
+        {
+            "slot_name": "slot2",
+            "metadata": {
+                "medical": {
+                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+                }
+            },
+        }
+    ]
+    mock_file2.full_path = "/path/to/file2"
+
+    remote_files: List[DatasetItem] = [mock_file1, mock_file2]
+    legacy_scaling, pixel_transform = _get_remote_medical_file_transform_requirements(
+        remote_files
+    )
+
+    # Check MONAI file results
+    assert pixel_transform == {"/path/to/file1": {"slot1": [1.0, 2.0]}}
+
+    # Check legacy NifTI file results
+    assert "/path/to/file2" in legacy_scaling
+    assert "slot2" in legacy_scaling["/path/to/file2"]
+    assert legacy_scaling["/path/to/file2"]["slot2"].shape == (4, 4)
+    assert (
+        legacy_scaling["/path/to/file2"]["slot2"]
+        == np.array(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
+        )
+    ).all()
+
+
+def test_scale_coordinates_by_pixdims():
+    """
+    Test scaling of coordinates by pixdims for image and video annotations
+    """
+    image_annotations_slot_1 = make_bounding_box(
+        "bbox_class", x=10, y=20, w=30, h=40, slot_names=["slot1"]
+    )
+    image_annotations_slot_2 = make_polygon(
+        "polygon_class",
+        [[{"x": 1, "y": 2}, {"x": 3, "y": 4}]],
+        slot_names=["slot2"],
+    )
+
+    video_annotations_slot_1 = make_video_annotation(
+        frames={
+            0: make_bounding_box(
+                "bbox_class", x=10, y=20, w=30, h=40, slot_names=["slot1"]
+            )
+        },
+        keyframes={0: True},
+        segments=[],
+        interpolated=False,
+        slot_names=["slot1"],
+    )
+    video_annotations_slot_2 = make_video_annotation(
+        frames={
+            0: make_polygon(
+                "polygon_class",
+                [[{"x": 1, "y": 2}, {"x": 3, "y": 4}]],
+                slot_names=["slot2"],
+            )
+        },
+        keyframes={0: True},
+        segments=[],
+        interpolated=False,
+        slot_names=["slot2"],
+    )
+
+    image_annotations_path = Path("test.json")
+    video_annotations_path = Path("test2.json")
+
+    multi_slotted_image_annotations = AnnotationFile(
+        path=image_annotations_path,
+        filename=image_annotations_path.name,
+        annotation_classes=set(),
+        annotations=[image_annotations_slot_1, image_annotations_slot_2],
+    )
+
+    multi_slotted_video_annotations = AnnotationFile(
+        path=video_annotations_path,
+        filename=video_annotations_path.name,
+        annotation_classes=set(),
+        annotations=[video_annotations_slot_1, video_annotations_slot_2],
+    )
+
+    remote_files_that_require_pixel_to_mm_transform: Dict[
+        str, Dict[str, List[float]]
+    ] = {
+        str(image_annotations_path): {
+            "slot1": [2.0, 3.0],
+            "slot2": [1.5, 2.5],
+        },
+        str(video_annotations_path): {
+            "slot1": [4.0, 6.0],
+            "slot2": [3.0, 5.0],
+        },
+    }
+
+    scaled_files = _scale_coordinates_by_pixdims(
+        [multi_slotted_image_annotations, multi_slotted_video_annotations],
+        remote_files_that_require_pixel_to_mm_transform,
+    )
+
+    scaled_image_annotations = scaled_files[0].annotations
+    scaled_video_annotations = scaled_files[1].annotations
+
+    assert scaled_image_annotations[0].data == {
+        "x": 20.0,
+        "y": 60.0,
+        "w": 60.0,
+        "h": 120.0,
+    }
+    assert scaled_image_annotations[1].data == {
+        "paths": [[{"x": 1.5, "y": 5}, {"x": 4.5, "y": 10.0}]]
+    }
+    assert scaled_video_annotations[0].frames[0].data == {
+        "x": 40.0,
+        "y": 120.0,
+        "w": 120.0,
+        "h": 240.0,
+    }
+    assert scaled_video_annotations[1].frames[0].data == {
+        "paths": [[{"x": 3.0, "y": 10.0}, {"x": 9.0, "y": 20.0}]]
+    }
+
+
+def test_scale_coordinates_by_pixdims_no_scaling_needed():
+    """
+    Test that annotations are not scaled if no scaling is needed
+    """
+    single_image_annotation = make_bounding_box(
+        "bbox_class", x=10, y=20, w=30, h=40, slot_names=["slot1"]
+    )
+
+    image_annotations_path = Path("test.json")
+    single_slotted_annotation_file = AnnotationFile(
+        path=image_annotations_path,
+        filename=image_annotations_path.name,
+        annotation_classes=set(),
+        annotations=[single_image_annotation],
+    )
+
+    remote_files_that_require_pixel_to_mm_transform: Dict[
+        str, Dict[str, List[float]]
+    ] = {
+        str(image_annotations_path): {
+            "slot2": [1.0, 1.0],
+        },
+    }
+
+    scaled_files = _scale_coordinates_by_pixdims(
+        [single_slotted_annotation_file],
+        remote_files_that_require_pixel_to_mm_transform,
+    )
+
+    assert scaled_files[0].annotations[0].data == {
+        "x": 10,
+        "y": 20,
+        "w": 30,
+        "h": 40,
+    }
+
+
+def test_slot_is_medical():
+    """
+    Test that slot_is_medical returns True if the slot has medical metadata
+    """
+    medical_slot = {"metadata": {"medical": {}}}
+    non_medical_slot = {"metadata": {}}
+    assert slot_is_medical(medical_slot) is True
+    assert slot_is_medical(non_medical_slot) is False
+
+
+def test_slot_is_handled_by_monai():
+    """
+    Test that slot_is_handled_by_monai returns True if the slot has MONAI handler
+
+    """
+    monai_slot = {"metadata": {"medical": {"handler": "MONAI"}}}
+    non_monai_slot = {"metadata": {"medical": {}}}
+    assert slot_is_handled_by_monai(monai_slot) is True
+    assert slot_is_handled_by_monai(non_monai_slot) is False
