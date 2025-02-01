@@ -549,7 +549,7 @@ def shift_polygon_coords(
         else:
             return [{"x": p["y"], "y": p["x"]} for p in polygon]
     else:
-        return [{"x": p["y"] // pixdim[1], "y": p["x"] // pixdim[0]} for p in polygon]
+        return [{"x": p["y"], "y": p["x"]} for p in polygon]
 
 
 def get_view_idx(frame_idx: int, groups: List) -> int:
