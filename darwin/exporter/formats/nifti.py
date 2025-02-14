@@ -3,7 +3,6 @@ import json as native_json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from numbers import Number
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
@@ -54,6 +53,7 @@ class Volume:
     class_name: str
     series_instance_uid: str
     from_raster_layer: bool
+    primary_plane: str
 
 
 def export(
@@ -78,11 +78,15 @@ def export(
     """
     video_annotations = list(annotation_files)
     for video_annotation in video_annotations:
+        slot_name = video_annotation.slots[0].name
         try:
             medical_metadata = video_annotation.slots[0].metadata
             legacy = not medical_metadata.get("handler") == "MONAI"  # type: ignore
+            plane_map = medical_metadata.get("plane_map", {slot_name: "AXIAL"})
+            primary_plane = plane_map.get(slot_name, "AXIAL")
         except (KeyError, AttributeError):
             legacy = True
+            primary_plane = "AXIAL"
 
         image_id = check_for_error_and_return_imageid(video_annotation, output_dir)
         if not isinstance(image_id, str):
@@ -103,6 +107,7 @@ def export(
             class_names_to_export=polygon_class_names,
             from_raster_layer=False,
             mask_present=mask_present,
+            primary_plane=primary_plane,
         )
         slot_map = {slot.name: slot for slot in video_annotation.slots}
         polygon_annotations = [
@@ -132,6 +137,7 @@ def export(
                 video_annotation,
                 class_names_to_export=list(mask_id_to_classname.values()),
                 from_raster_layer=True,
+                primary_plane=primary_plane,
             )
 
             # This assumes only one raster_layer annotation. If we allow multiple raster layers per annotation file we need to change this.
@@ -146,6 +152,7 @@ def export(
                     mask_id_to_classname=mask_id_to_classname,
                     slot_map=slot_map,
                     output_volumes=raster_output_volumes,
+                    primary_plane=primary_plane,
                 )
             write_output_volume_to_disk(
                 raster_output_volumes,
@@ -161,6 +168,7 @@ def build_output_volumes(
     from_raster_layer: bool = False,
     class_names_to_export: List[str] = None,
     mask_present: Optional[bool] = False,
+    primary_plane: str = "AXIAL",
 ) -> Dict:
     """
     This is a function to create the output volumes based on the whole annotation file
@@ -175,6 +183,8 @@ def build_output_volumes(
         The list of class names to export
     mask_present: bool
         If mask annotations are present in the annotation
+    primary_plane: str
+        The primary plane of the annotation
     Returns
     -------
     output_volumes: Dict
@@ -197,6 +207,7 @@ def build_output_volumes(
             class_names_to_export = [
                 ""
             ]  # If there are no annotations to export, we still need to create an empty volume
+
         output_volumes[series_instance_uid] = {
             class_name: Volume(
                 pixel_array=np.zeros(volume_dims),
@@ -207,6 +218,7 @@ def build_output_volumes(
                 series_instance_uid=series_instance_uid,
                 class_name=class_name,
                 from_raster_layer=from_raster_layer,
+                primary_plane=primary_plane,
             )
             for class_name in class_names_to_export
         }
@@ -289,7 +301,7 @@ def update_pixel_array(
     volume: Dict,
     annotation_class_name: str,
     im_mask: np.ndarray,
-    plane: Plane,
+    primary_plane: str,
     frame_idx: int,
 ) -> Dict:
     """Updates the pixel array of the given volume with the given mask.
@@ -302,7 +314,7 @@ def update_pixel_array(
         Name of the annotation class
     im_mask : np.ndarray
         Mask to be added to the pixel array
-    plane : Plane
+    primary_plane : str
         Plane of the mask
     frame_idx : int
         Frame index of the mask
@@ -313,12 +325,12 @@ def update_pixel_array(
         Updated volume
     """
     plane_to_slice = {
-        Plane.XY: np.s_[:, :, frame_idx],
-        Plane.XZ: np.s_[:, frame_idx, :],
-        Plane.YZ: np.s_[frame_idx, :, :],
+        "AXIAL": np.s_[:, :, frame_idx],
+        "CORONAL": np.s_[:, frame_idx, :],
+        "SAGITTAL": np.s_[frame_idx, :, :],
     }
-    if plane in plane_to_slice:
-        slice_ = plane_to_slice[plane]
+    if primary_plane in plane_to_slice:
+        slice_ = plane_to_slice[primary_plane]
         volume[annotation_class_name].pixel_array[slice_] = np.logical_or(
             im_mask,
             volume[annotation_class_name].pixel_array[slice_],
@@ -358,22 +370,27 @@ def populate_output_volumes_from_polygons(
         frames = annotation.frames
 
         for frame_idx in frames.keys():
-            plane = get_plane_from_slot_name(
-                slot_name, slot.metadata.get("orientation")
-            )
+            primary_plane = volume[annotation.annotation_class.name].primary_plane
             dims = volume[annotation.annotation_class.name].dims
-            if plane == Plane.XY:
+            if primary_plane == "AXIAL":
                 height, width = dims[0], dims[1]
-            elif plane == Plane.XZ:
+            elif primary_plane == "CORONAL":
                 height, width = dims[0], dims[2]
-            elif plane == Plane.YZ:
+            elif primary_plane == "SAGITTAL":
                 height, width = dims[1], dims[2]
             pixdims = volume[annotation.annotation_class.name].pixdims
             frame_data = frames[frame_idx].data
             if "paths" in frame_data:
                 # Dealing with a complex polygon
                 polygons = [
-                    shift_polygon_coords(polygon_path, pixdims, legacy=legacy)
+                    shift_polygon_coords(
+                        polygon_path,
+                        pixdims,
+                        primary_plane=volume[
+                            annotation.annotation_class.name
+                        ].primary_plane,
+                        legacy=legacy,
+                    )
                     for polygon_path in frame_data["paths"]
                 ]
             else:
@@ -383,7 +400,7 @@ def populate_output_volumes_from_polygons(
                 output_volumes[series_instance_uid],
                 annotation.annotation_class.name,
                 im_mask,
-                plane,
+                primary_plane,
                 frame_idx,
             )
 
@@ -393,6 +410,7 @@ def populate_output_volumes_from_raster_layer(
     mask_id_to_classname: Dict,
     slot_map: Dict,
     output_volumes: Dict,
+    primary_plane: str,
 ) -> Dict:
     """
     Populates the output volumes provided with the raster layer annotations
@@ -407,7 +425,8 @@ def populate_output_volumes_from_raster_layer(
         Dictionary of the different slots within the annotation file
     output_volumes : Dict
         volumes created from the build_output_volumes file
-
+    primary_plane: str
+        The primary plane of the volume containing the annotation
     Returns
     -------
     volume : dict
@@ -427,7 +446,12 @@ def populate_output_volumes_from_raster_layer(
         frame_data = annotation.frames[frame_idx]
         dense_rle = frame_data.data["dense_rle"]
         mask_2d = decode_rle(dense_rle, slot.width, slot.height)
-        multilabel_volume[:, :, frame_idx] = mask_2d.T
+        if primary_plane == "AXIAL":
+            multilabel_volume[:, :, frame_idx] = mask_2d.T
+        elif primary_plane == "CORONAL":
+            multilabel_volume[:, frame_idx, :] = mask_2d.T
+        elif primary_plane == "SAGITTAL":
+            multilabel_volume[frame_idx, :, :] = mask_2d.T
         mask_annotation_ids_mapping.update(
             frame_data.data["mask_annotation_ids_mapping"]
         )
@@ -538,8 +562,39 @@ def _get_reoriented_nifti_image(
 
 
 def shift_polygon_coords(
-    polygon: List[Dict], pixdim: List[Number], legacy: bool = False
-) -> List:
+    polygon: List[Dict[str, float]],
+    pixdim: List[float],
+    primary_plane: str,
+    legacy: bool = False,
+) -> List[Dict[str, float]]:
+    """
+    Shifts input polygon coordinates based on the primary plane and the pixdim of the volume
+    the polygon belongs to.
+
+    If the volume is a legacy volume, we perform isotropic scaling
+
+    Parameters
+    ----------
+    polygon : List[Dict[str, float]]
+        The polygon to be shifted
+    pixdim : List[float]
+        The (x, y, z) pixel dimensons of the image
+    primary_plane : str
+        The primary plane of the volume that the polygon belongs to
+    legacy : bool
+        Whether this polygon is being exported from a volume that requires legacy NifTI scaling
+
+    Returns
+    -------
+    List[Dict[str, Number]]
+        The shifted polygon
+    """
+    if primary_plane == "AXIAL":
+        pixdim = [pixdim[0], pixdim[1]]
+    elif primary_plane == "CORONAL":
+        pixdim = [pixdim[0], pixdim[2]]
+    elif primary_plane == "SAGITTAL":
+        pixdim = [pixdim[1], pixdim[2]]
     if legacy:
         # Need to make it clear that we flip x/y because we need to take the transpose later.
         if pixdim[1] > pixdim[0]:
@@ -572,28 +627,6 @@ def get_view_idx(frame_idx: int, groups: List) -> int:
     for view_idx, group in enumerate(groups):
         if frame_idx in group:
             return view_idx
-
-
-def get_plane_from_slot_name(slot_name: str, orientation: Union[str, None]) -> Plane:
-    """Returns the plane from the given slot name and orientation.
-
-    Parameters
-    ----------
-    slot_name : str
-        Slot name
-    orientation : Union[str, None]
-        Orientation
-
-    Returns
-    -------
-    Plane
-        Enum representing the plane
-    """
-    if orientation is None:
-        orientation_dict = {"0.1": 0, "0.2": 1, "0.3": 2}
-        return Plane(orientation_dict.get(slot_name, 0))
-    orientation_dict = {"AXIAL": 0, "SAGITTAL": 1, "CORONAL": 2}
-    return Plane(orientation_dict.get(orientation, 0))
 
 
 def process_metadata(metadata: Dict) -> Tuple:

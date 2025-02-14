@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
-import numpy as np
 
 import orjson as json
 import pytest
@@ -1959,22 +1958,3 @@ class TestGetRemoteFilesThatRequireLegacyScaling:
                 current_workflow=None,
             ),
         ]
-
-    @patch.object(RemoteDatasetV2, "fetch_remote_files")
-    def test_get_remote_files_that_require_legacy_scaling(
-        self, mock_fetch_remote_files, mock_remote_files
-    ):
-        mock_fetch_remote_files.return_value = mock_remote_files
-        remote_dataset = RemoteDatasetV2(
-            client=MagicMock(),
-            team="test-team",
-            name="test-dataset",
-            slug="test-dataset",
-            dataset_id=1,
-        )
-
-        result = remote_dataset._get_remote_files_that_require_legacy_scaling()
-        assert Path("/path/to/file/filename") in result
-        np.testing.assert_array_equal(
-            result[Path("/path/to/file/filename")]["0"], np.array([[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])  # type: ignore
-        )

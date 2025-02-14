@@ -70,7 +70,7 @@ def test_image_annotation_nifti_import_single_slot(team_slug_darwin_json_v2: str
             )
 
 
-def test_image_annotation_nifti_import_multi_slot(team_slug_darwin_json_v2: str):
+def test_image_annotation_nifti_import_mpr(team_slug_darwin_json_v2: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         with ZipFile("tests/data.zip") as zfile:
             zfile.extractall(tmpdir)
@@ -99,8 +99,19 @@ def test_image_annotation_nifti_import_multi_slot(team_slug_darwin_json_v2: str)
             upload_json.write_text(
                 json.dumps(input_dict, indent=4, sort_keys=True, default=str)
             )
-
-            annotation_files = parse_path(path=upload_json)
+            legacy_remote_file_slot_affine_maps = {}
+            pixdims_and_primary_planes = {
+                Path("/vol0 (1).nii"): {
+                    "0.3": ([1, 1, 1], "AXIAL"),
+                    "0.2": ([1, 1, 1], "CORONAL"),
+                    "0.1": ([1, 1, 1], "SAGITTAL"),
+                }
+            }
+            annotation_files = parse_path(
+                path=upload_json,
+                legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+                pixdims_and_primary_planes=pixdims_and_primary_planes,
+            )
             annotation_file = annotation_files[0]
             output_json_string = json.loads(
                 serialise_annotation_file(annotation_file, as_dict=False)
@@ -190,7 +201,7 @@ def test_image_annotation_nifti_import_single_slot_to_mask_legacy(
             with patch("darwin.importer.formats.nifti.zoom") as mock_zoom:
                 mock_zoom.side_effect = ndimage.zoom
 
-                remote_files_that_require_legacy_scaling = {
+                legacy_remote_file_slot_affine_maps = {
                     Path("/2044737.fat.nii"): {
                         "0": np.array(
                             [
@@ -204,7 +215,7 @@ def test_image_annotation_nifti_import_single_slot_to_mask_legacy(
                 }
                 annotation_files = parse_path(
                     path=upload_json,
-                    remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+                    legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
                 )
                 annotation_file = annotation_files[0]
                 output_json_string = json.loads(
@@ -283,7 +294,7 @@ def test_process_nifti_orientation_ras_to_lpi(team_slug_darwin_json_v2):
             lpi_transformed_file = nib.orientations.apply_orientation(
                 ras_transformed_file.get_fdata(), lpi_ornt
             )
-            processed_file, _ = process_nifti(input_data=ras_file)
+            processed_file = process_nifti(input_data=ras_file)
             assert not np.array_equal(processed_file, ras_file._dataobj)
             assert np.array_equal(processed_file, lpi_transformed_file)
 
@@ -315,7 +326,7 @@ def test_process_nifti_orientation_las_to_lpi(team_slug_darwin_json_v2):
             lpi_transformed_file = nib.orientations.apply_orientation(
                 ras_transformed_file.get_fdata(), lpi_ornt
             )
-            processed_file, _ = process_nifti(input_data=las_file)
+            processed_file = process_nifti(input_data=las_file)
             assert not np.array_equal(processed_file, las_file._dataobj)
             assert np.array_equal(processed_file, lpi_transformed_file)
 
@@ -526,7 +537,7 @@ def test_parse_path_nifti_with_legacy_scaling():
     )
     adjust_nifti_label_filepath(nifti_annotation_filepath, nifti_filepath)
     expected_annotations = parse_darwin_json(expected_annotations_filepath)
-    remote_files_that_require_legacy_scaling = {
+    legacy_remote_file_slot_affine_maps = {
         Path("/2044737.fat.nii.gz"): {
             "0": np.array(
                 [
@@ -540,7 +551,7 @@ def test_parse_path_nifti_with_legacy_scaling():
     }
     parsed_annotations = parse_path(
         nifti_annotation_filepath,
-        remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
     )
     for frame_idx in expected_annotations.annotations[0].frames:
         expected_annotation = (
@@ -572,12 +583,18 @@ def test_parse_path_nifti_without_legacy_scaling():
         / "no-legacy"
         / "BRAINIX_NIFTI_ROI.nii.json"
     )
-    remote_files_that_require_legacy_scaling = {}
+    legacy_remote_file_slot_affine_maps = {}
+    pixdims_and_primary_planes = {
+        Path("/2044737.fat.nii.gz"): {
+            "0": ([0.7986109, 0.798611, 6.0000024], "AXIAL"),
+        }
+    }
     adjust_nifti_label_filepath(nifti_annotation_filepath, nifti_filepath)
     expected_annotations = parse_darwin_json(expected_annotations_filepath)
     parsed_annotations = parse_path(
         nifti_annotation_filepath,
-        remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+        pixdims_and_primary_planes=pixdims_and_primary_planes,
     )
     for frame_idx in expected_annotations.annotations[0].frames:
         expected_annotation = (

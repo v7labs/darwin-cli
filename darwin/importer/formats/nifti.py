@@ -31,7 +31,8 @@ from darwin.importer.formats.nifti_schemas import nifti_import_schema
 
 def parse_path(
     path: Path,
-    remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
+    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
+    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]] = {},
 ) -> Optional[List[dt.AnnotationFile]]:
     """
     Parses the given ``nifti`` file and returns a ``List[dt.AnnotationFile]`` with the parsed
@@ -41,8 +42,10 @@ def parse_path(
     ----------
     path : Path
         The ``Path`` to the ``nifti`` file.
-    remote_files_that_require_legacy_scaling : Optional[Dict[Path, Dict[str, Any]]]
+    legacy_remote_file_slot_affine_maps : Optional[Dict[Path, Dict[str, Any]]]
         A dictionary of remote file full paths to their slot affine maps
+    remote_file_pixdims : Optional[Dict[Path, Dict[str, Tuple[List[float], str]]]]
+        A dictionary of remote file full paths to their pixel dimensions and primary plane
 
     Returns
     -------
@@ -79,7 +82,6 @@ def parse_path(
         remote_file_path = Path(nifti_annotation["image"])
         if not str(remote_file_path).startswith("/"):
             remote_file_path = Path("/" + str(remote_file_path))
-
         annotation_file = _parse_nifti(
             Path(nifti_annotation["label"]),
             Path(nifti_annotation["image"]),
@@ -89,7 +91,8 @@ def parse_path(
             slot_names=nifti_annotation.get("slot_names", []),
             is_mpr=nifti_annotation.get("is_mpr", False),
             remote_file_path=remote_file_path,
-            remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+            legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+            pixdims_and_primary_planes=pixdims_and_primary_planes,
         )
         annotation_files.append(annotation_file)
     return annotation_files
@@ -104,15 +107,15 @@ def _parse_nifti(
     slot_names: List[str],
     is_mpr: bool,
     remote_file_path: Path,
-    remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
+    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
+    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]] = {},
 ) -> dt.AnnotationFile:
-    img, pixdims = process_nifti(
+    img = process_nifti(
         nib.load(nifti_path),
         remote_file_path=remote_file_path,
-        remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,
+        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
     )
-
-    legacy = remote_file_path in remote_files_that_require_legacy_scaling
+    legacy = remote_file_path in legacy_remote_file_slot_affine_maps
     processed_class_map = process_class_map(class_map)
     video_annotations = []
     if mode == "instances":  # For each instance produce a video annotation
@@ -128,7 +131,8 @@ def _parse_nifti(
                     class_name=class_name,
                     slot_names=slot_names,
                     is_mpr=is_mpr,
-                    pixdims=pixdims,
+                    pixdims_and_primary_planes=pixdims_and_primary_planes,
+                    remote_file_path=remote_file_path,
                     legacy=legacy,
                 )
                 if _video_annotations:
@@ -143,7 +147,8 @@ def _parse_nifti(
                 class_name=class_name,
                 slot_names=slot_names,
                 is_mpr=is_mpr,
-                pixdims=pixdims,
+                pixdims_and_primary_planes=pixdims_and_primary_planes,
+                remote_file_path=remote_file_path,
                 legacy=legacy,
             )
             if _video_annotations is None:
@@ -154,7 +159,8 @@ def _parse_nifti(
             img,
             processed_class_map,
             slot_names,
-            pixdims=pixdims,
+            pixdims_and_primary_planes=pixdims_and_primary_planes,
+            remote_file_path=remote_file_path,
             isotropic=legacy,
         )
     if mode in ["video", "instances"]:
@@ -192,30 +198,53 @@ def get_polygon_video_annotations(
     class_idxs: List[int],
     slot_names: List[str],
     is_mpr: bool,
-    pixdims: Tuple[float],
+    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]],
+    remote_file_path: Path,
     legacy: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     if not is_mpr:
+        if remote_file_path in pixdims_and_primary_planes:
+            item_pixdims_and_primary_planes = pixdims_and_primary_planes[
+                remote_file_path
+            ]
+            if slot_names:
+                slot_name = slot_names[0]
+            else:
+                slot_name = list(item_pixdims_and_primary_planes.keys())[0]
+            slot_pixims_and_primary_plane = item_pixdims_and_primary_planes[slot_name]
+            primary_plane = slot_pixims_and_primary_plane[1]
+            pixdims = slot_pixims_and_primary_plane[0]
+        else:
+            pixdims = [1.0, 1.0, 1.0]
+            primary_plane = "AXIAL"
+
+        if primary_plane == "AXIAL":
+            view_idx = 2
+        elif primary_plane == "CORONAL":
+            view_idx = 1
+        elif primary_plane == "SAGITTAL":
+            view_idx = 0
         return nifti_to_video_polygon_annotation(
             volume,
             class_name,
             class_idxs,
             slot_names,
-            view_idx=2,
-            pixdims=pixdims,
+            pixdims,
+            view_idx,
             legacy=legacy,
         )
     elif is_mpr and len(slot_names) == 3:
         video_annotations = []
         for view_idx, slot_name in enumerate(slot_names):
+            pixdims = pixdims_and_primary_planes[remote_file_path][slot_name][0]
             _video_annotations = nifti_to_video_polygon_annotation(
                 volume,
                 class_name,
                 class_idxs,
                 [slot_name],
-                view_idx=view_idx,
-                pixdims=pixdims,
+                pixdims,
                 legacy=legacy,
+                view_idx=view_idx,
             )
             video_annotations += _video_annotations
         return video_annotations
@@ -227,18 +256,27 @@ def get_mask_video_annotations(
     volume: np.ndarray,
     processed_class_map: Dict,
     slot_names: List[str],
-    pixdims: Tuple[int, int, int] = (1, 1, 1),
+    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]],
+    remote_file_path: Path,
     isotropic: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     """
     The function takes a volume and a class map and returns a list of video annotations
 
     We write a single raster layer for the volume but K mask annotations, where K is the number of classes.
-
-    Assumptions:
-    - Importing annotation from Axial view only (view_idx=2)
     """
-    new_size = get_new_axial_size(volume, pixdims, isotropic=isotropic)
+    if remote_file_path in pixdims_and_primary_planes:
+        item_pixdims_and_primary_planess = pixdims_and_primary_planes[remote_file_path]
+        if slot_names:
+            slot_name = slot_names[0]
+        else:
+            slot_name = list(item_pixdims_and_primary_planess.keys())[0]
+        slot_pixdims_and_primary_planes = item_pixdims_and_primary_planess[slot_name]
+        primary_plane = slot_pixdims_and_primary_planes[1]
+        pixdims = slot_pixdims_and_primary_planes[0]
+    else:
+        pixdims = [1.0, 1.0, 1.0]
+        primary_plane = "AXIAL"
 
     frame_annotations = OrderedDict()
     all_mask_annotations = defaultdict(lambda: OrderedDict())
@@ -248,10 +286,23 @@ def get_mask_video_annotations(
     }
     # We need to create a new mapping dictionary where the keys are the mask_annotation_ids
     # and the values are the new integers which we use in the raster layer
+
+    if primary_plane == "AXIAL":
+        view_idx = 2
+    elif primary_plane == "CORONAL":
+        view_idx = 1
+    elif primary_plane == "SAGITTAL":
+        view_idx = 0
+
     mask_annotation_ids_mapping = {}
     map_from_nifti_idx_to_raster_idx = {0: 0}  # 0 is the background class
-    for i in range(volume.shape[2]):
-        slice_mask = volume[:, :, i].astype(np.uint8)
+    for i in range(volume.shape[view_idx]):
+        if view_idx == 2:
+            slice_mask = volume[:, :, i].astype(np.uint8)
+        elif view_idx == 1:
+            slice_mask = volume[:, i, :].astype(np.uint8)
+        elif view_idx == 0:
+            slice_mask = volume[i, :, :].astype(np.uint8)
         for raster_idx, (class_name, class_idxs) in enumerate(
             processed_class_map.items()
         ):
@@ -271,15 +322,21 @@ def get_mask_video_annotations(
                 map_from_nifti_idx_to_raster_idx[class_idx] = raster_idx + 1
     # Now that we've created all the mask annotations, we need to create the raster layer
     # We only map the mask_annotation_ids which appear in any given frame.
-    for i in range(volume.shape[2]):
-        slice_mask = volume[:, :, i].astype(
-            np.uint8
-        )  # Product requirement: We only support 255 classes!
-
+    axial_size_after_isotropic_scaling = get_new_axial_size(volume, pixdims)
+    for i in range(volume.shape[view_idx]):
+        if view_idx == 2:
+            slice_mask = volume[:, :, i].astype(np.uint8)
+        elif view_idx == 1:
+            slice_mask = volume[:, i, :].astype(np.uint8)
+        elif view_idx == 0:
+            slice_mask = volume[i, :, :].astype(np.uint8)
         if isotropic:
             slice_mask = zoom(
                 slice_mask,
-                (new_size[0] / volume.shape[0], new_size[1] / volume.shape[1]),
+                (
+                    axial_size_after_isotropic_scaling[0] / volume.shape[0],
+                    axial_size_after_isotropic_scaling[1] / volume.shape[1],
+                ),
             )
 
         # We need to convert from nifti_idx to raster_idx
@@ -329,8 +386,8 @@ def nifti_to_video_polygon_annotation(
     class_name: str,
     class_idxs: List[int],
     slot_names: List[str],
-    view_idx: int = 2,
-    pixdims: Tuple[int, int, int] = (1, 1, 1),
+    pixdims: List[float],
+    view_idx: int,
     legacy: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     frame_annotations = OrderedDict()
@@ -523,8 +580,8 @@ def process_nifti(
     input_data: nib.nifti1.Nifti1Image,
     ornt: Optional[List[List[float]]] = [[0.0, -1.0], [1.0, -1.0], [2.0, -1.0]],
     remote_file_path: Path = Path("/"),
-    remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]] = {},
-) -> Tuple[np.ndarray, Tuple[float]]:
+    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
+) -> Tuple[np.ndarray, Tuple[float], str]:
     """
     Converts a NifTI object of any orientation to the passed ornt orientation.
     The default ornt is LPI.
@@ -547,28 +604,25 @@ def process_nifti(
             ornt[:,0] is the transpose that needs to be done to the implied array, as in arr.transpose(ornt[:,0]).
         remote_file_path: Path
             The full path of the remote file
-        remote_files_that_require_legacy_scaling: Dict[Path, Dict[str, Any]]
+        legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]]
             A dictionary of remote file full paths to their slot affine maps
 
     Returns:
         data_array: pixel array with orientation ornt.
-        pixdims: tuple of nifti header zoom values.
     """
     img = correct_nifti_header_if_necessary(input_data)
     orig_ax_codes = nib.orientations.aff2axcodes(img.affine)
     orig_ornt = nib.orientations.axcodes2ornt(orig_ax_codes)
     is_dicom = remote_file_path.suffix.lower() == ".dcm"
-    if remote_file_path in remote_files_that_require_legacy_scaling and is_dicom:
-        slot_affine_map = remote_files_that_require_legacy_scaling[remote_file_path]
+    if remote_file_path in legacy_remote_file_slot_affine_maps and is_dicom:
+        slot_affine_map = legacy_remote_file_slot_affine_maps[remote_file_path]
         affine = slot_affine_map[next(iter(slot_affine_map))]  # Take the 1st slot
         ax_codes = nib.orientations.aff2axcodes(affine)
         ornt = nib.orientations.axcodes2ornt(ax_codes)
     transform = nib.orientations.ornt_transform(orig_ornt, ornt)
     reoriented_img = img.as_reoriented(transform)
     data_array = reoriented_img.get_fdata()
-    pixdims = reoriented_img.header.get_zooms()
-
-    return data_array, pixdims
+    return data_array
 
 
 def convert_to_dense_rle(raster: np.ndarray) -> List[int]:
@@ -585,22 +639,23 @@ def convert_to_dense_rle(raster: np.ndarray) -> List[int]:
 
 
 def get_new_axial_size(
-    volume: np.ndarray, pixdims: Tuple[int, int, int], isotropic: bool = False
+    volume: np.ndarray,
+    pixdims: List[float],
+    isotropic: bool = False,
 ) -> Tuple[int, int]:
     """Get the new size of the Axial plane after resizing to isotropic pixel dimensions.
 
     Args:
         volume: Input volume.
         pixdims: The pixel dimensions / spacings of the volume.
-        no_isotropic: bool, default: True
-            If True, the function will not attempt to resize the annotations to isotropic pixel dimensions.
-            If False, the function will resize the annotations to isotropic pixel dimensions.
+        isotropic: bool, default: True
+            If True, the function will attempt to resize the annotations to isotropic pixel dimensions.
+            If False, the function will not attempt to resize the annotations to isotropic pixel dimensions.
 
     Returns:
         Tuple[int, int]: The new size of the Axial plane.
     """
     original_size = volume.shape
-
     if not isotropic:
         return original_size[0], original_size[1]
 

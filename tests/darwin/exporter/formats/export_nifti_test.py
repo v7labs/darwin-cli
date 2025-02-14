@@ -169,3 +169,75 @@ def test_export_creates_file_for_polygons_and_masks(
                 # Empty the directory for the next test
                 for output_file in video_annotation_files[video_annotation_file]:
                     (Path(tmpdir) / output_file).unlink()
+
+
+def test_shift_polygon_coords_no_scaling():
+    """Test polygon coordinate shifting where all pixdims values are 1.0."""
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [1.0, 1.0, 1.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "AXIAL", legacy=False)
+    expected = [{"x": 20.0, "y": 10.0}, {"x": 40.0, "y": 30.0}, {"x": 60.0, "y": 50.0}]
+    assert result == expected
+
+
+def test_shift_polygon_coords_axial_plane():
+    """Test polygon coordinate shifting in axial plane."""
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.25, 0.5, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "AXIAL", legacy=False)
+    expected = [
+        {"x": 40.0, "y": 40.0},
+        {"x": 80.0, "y": 120.0},
+        {"x": 120.0, "y": 200.0},
+    ]
+    assert result == expected
+
+
+def test_shift_polygon_coords_coronal_plane():
+    """Test polygon coordinate shifting in coronal plane."""
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.25, 0.5, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "CORONAL", legacy=False)
+    expected = [
+        {"x": 10.0, "y": 40.0},
+        {"x": 20.0, "y": 120.0},
+        {"x": 30.0, "y": 200.0},
+    ]
+    assert result == expected
+
+
+def test_shift_polygon_coords_sagittal_plane():
+    """Test polygon coordinate shifting in sagittal plane."""
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.25, 0.5, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "SAGITTAL", legacy=False)
+    expected = [
+        {"x": 10.0, "y": 20.0},
+        {"x": 20.0, "y": 60.0},
+        {"x": 30.0, "y": 100.0},
+    ]
+    assert result == expected
+
+
+def test_shift_polygon_coords_legacy():
+    """Test polygon coordinate shifting with legacy mode."""
+    # Test case where pixdim[1] > pixdim[0]
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.25, 0.5, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "AXIAL", legacy=True)
+    expected = [{"x": 20.0, "y": 20.0}, {"x": 40.0, "y": 60.0}, {"x": 60.0, "y": 100.0}]
+    assert result == expected
+
+    # Test case where pixdim[1] < pixdim[0]
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.5, 0.25, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "AXIAL", legacy=True)
+    expected = [{"x": 40.0, "y": 10.0}, {"x": 80.0, "y": 30.0}, {"x": 120.0, "y": 50.0}]
+    assert result == expected
+
+    # Test case where pixdim[1] == pixdim[0]
+    polygon = [{"x": 10.0, "y": 20.0}, {"x": 30.0, "y": 40.0}, {"x": 50.0, "y": 60.0}]
+    pixdim = [0.5, 0.5, 2.0]
+    result = nifti.shift_polygon_coords(polygon, pixdim, "AXIAL", legacy=True)
+    expected = [{"x": 20.0, "y": 10.0}, {"x": 40.0, "y": 30.0}, {"x": 60.0, "y": 50.0}]
+    assert result == expected

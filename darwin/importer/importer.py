@@ -40,7 +40,7 @@ from darwin.path_utils import is_properties_enabled, parse_metadata
 from darwin.utils.utils import _parse_annotators
 
 Unknown = Any  # type: ignore
-
+import numpy as np
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -70,6 +70,11 @@ UNSUPPORTED_CLASSES = ["string", "graph"]
 
 # Classes that are defined on team level automatically and available in all datasets
 GLOBAL_CLASSES = ["__raster_layer__"]
+
+# Add a length of 5 for URL encoding overhead and separators per filename
+FILENAME_OVERHEAD = 5
+MAX_URL_LENGTH = 2000
+BASE_URL_LENGTH = 200
 
 DEPRECATION_MESSAGE = """
 
@@ -117,7 +122,10 @@ def _find_and_parse(  # noqa: C901
     console: Optional[Console] = None,
     use_multi_cpu: bool = True,
     cpu_limit: int = 1,
-    remote_files_that_require_legacy_scaling: Optional[List[Path]] = None,
+    legacy_remote_file_slot_affine_maps: Optional[
+        Dict[str, Dict[Path, np.ndarray]]
+    ] = {},
+    pixdims_and_primary_planes: Optional[Dict[str, Dict[Path, np.ndarray]]] = {},
 ) -> Optional[Iterable[dt.AnnotationFile]]:
     is_console = console is not None
 
@@ -151,7 +159,8 @@ def _find_and_parse(  # noqa: C901
                     parsed_files = pool.map(
                         lambda file: importer(
                             file,
-                            remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,  # type: ignore
+                            legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,  # type: ignore
+                            pixdims_and_primary_planes=pixdims_and_primary_planes,  # type: ignore
                         ),
                         tqdm(files),
                     )
@@ -172,7 +181,8 @@ def _find_and_parse(  # noqa: C901
             parsed_files = [
                 importer(
                     file,
-                    remote_files_that_require_legacy_scaling=remote_files_that_require_legacy_scaling,  # type: ignore
+                    legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,  # type: ignore
+                    pixdims_and_primary_planes=pixdims_and_primary_planes,  # type: ignore
                 )
                 for file in tqdm(files)
             ]
@@ -185,6 +195,8 @@ def _find_and_parse(  # noqa: C901
     maybe_console("Finished.")
     # Sometimes we have a list of lists of AnnotationFile, sometimes we have a list of AnnotationFile
     # We flatten the list of lists
+    if not parsed_files:
+        return None
     if isinstance(parsed_files, list):
         if isinstance(parsed_files[0], list):
             parsed_files = [item for sublist in parsed_files for item in sublist]
@@ -1252,21 +1264,32 @@ def import_annotations(  # noqa: C901
     console.print("Retrieving local annotations ...", style="info")
     local_files = []
     local_files_missing_remotely = []
+
+    remote_files_targeted_by_import = _get_remote_files_targeted_by_import(
+        importer, file_paths, dataset, console, use_multi_cpu, cpu_limit
+    )
+    (
+        legacy_remote_file_slot_affine_maps,
+        pixdims_and_primary_planes,
+    ) = _get_remote_medical_file_transform_requirements(remote_files_targeted_by_import)
+
     if importer.__module__ == "darwin.importer.formats.nifti":
-        remote_files_that_require_legacy_scaling = (
-            dataset._get_remote_files_that_require_legacy_scaling()
-        )
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
             importer,
             file_paths,
             console,
             use_multi_cpu,
             cpu_limit,
-            remote_files_that_require_legacy_scaling,
+            legacy_remote_file_slot_affine_maps,
+            pixdims_and_primary_planes,
         )
     else:
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
-            importer, file_paths, console, use_multi_cpu, cpu_limit
+            importer,
+            file_paths,
+            console,
+            use_multi_cpu,
+            cpu_limit,
         )
 
     if not maybe_parsed_files:
@@ -2317,3 +2340,147 @@ def _split_payloads(
         payloads.append(current_payload)
 
     return payloads
+
+
+def _get_remote_files_targeted_by_import(
+    importer: Callable[[Path], Union[List[dt.AnnotationFile], dt.AnnotationFile, None]],
+    file_paths: List[PathLike],
+    dataset: "RemoteDataset",
+    console: Optional[Console] = None,
+    use_multi_cpu: bool = True,
+    cpu_limit: int = 1,
+) -> List[DatasetItem]:
+    """
+    Parses local annotations files for import and returns a list of remote dataset items
+    targeted by the import. Handles chunking of requests if there are many files to
+    avoid URL length issues.
+    Parameters
+    ----------
+    importer: Callable[[Path], Union[List[dt.AnnotationFile], dt.AnnotationFile, None]]
+        The importer used to parse local annotation files
+    file_paths: List[PathLike]
+        A list of local annotation files to be uploaded
+    dataset: RemoteDataset
+        The remote dataset to fetch files from
+    console: Optional[Console]
+        The console object
+    use_multi_cpu: bool
+        Whether to use multi-CPU processing
+    cpu_limit: int
+        The number of CPUs to use for processing
+    Returns
+    -------
+    List[DatasetItem]
+        A list of remote dataset items targeted by the import
+    Raises
+    ------
+    ValueError
+        If no files could be parsed or if the URL becomes too long even with minimum chunk size
+    """
+    maybe_parsed_files = _find_and_parse(
+        importer,
+        file_paths,
+        console,
+        use_multi_cpu,
+        cpu_limit,
+    )
+    if not maybe_parsed_files:
+        raise ValueError("Not able to parse any files.")
+
+    remote_filenames = list({file.filename for file in maybe_parsed_files})
+    remote_filepaths = [file.full_path for file in maybe_parsed_files]
+
+    all_remote_files: List[DatasetItem] = []
+    current_chunk: List[str] = []
+    current_length = BASE_URL_LENGTH
+    max_chunk_length = MAX_URL_LENGTH - BASE_URL_LENGTH
+
+    for filename in remote_filenames:
+        filename_length = len(filename) + FILENAME_OVERHEAD
+        if current_length + filename_length > max_chunk_length and current_chunk:
+            remote_files = dataset.fetch_remote_files(
+                filters={"item_names": current_chunk}
+            )
+            all_remote_files.extend(remote_files)
+            current_chunk = []
+            current_length = BASE_URL_LENGTH
+
+        current_chunk.append(filename)
+        current_length += filename_length
+
+    if current_chunk:
+        remote_files = dataset.fetch_remote_files(filters={"item_names": current_chunk})
+        all_remote_files.extend(remote_files)
+
+    return [
+        remote_file
+        for remote_file in all_remote_files
+        if remote_file.full_path in remote_filepaths
+    ]
+
+
+def _get_remote_medical_file_transform_requirements(
+    remote_files_targeted_by_import: List[DatasetItem],
+) -> Tuple[Dict[Path, Dict[str, Any]], Dict[Path, Dict[Path, Tuple[List[float], str]]]]:
+    """
+    This function parses the remote files targeted by the import. If the remote file is
+    a medical file, it checks if it requires legacy NifTI scaling or not.
+
+    If the file requires legacy NifTI scaling, the affine matrix of the slot is returned
+    in the legacy_remote_file_slot_affine_map dictionary.
+
+    If the file is medical, the pixdims and the primary plane are returned
+    in the pixdims_and_primary_planes dictionary.
+
+    Parameters
+    ----------
+    remote_files_targeted_by_import: List[DatasetItem]
+        The remote files targeted by the import
+    Returns
+    -------
+    Tuple[Dict[Path, Dict[str, Any]], Dict[Path, Dict[str, Tuple[List[float], str]]]]
+        A tuple of 2 dictionaries:
+        - legacy_remote_file_slot_affine_map: A dictionary of remote files
+        that require legacy NifTI scaling and the slot name to affine matrix mapping
+        - pixdims_and_primary_planes: A dictionary of remote files
+        containing the (x, y, z) pixdims and the primary plane
+    """
+    legacy_remote_file_slot_affine_map = {}
+    pixdims_and_primary_planes = {}
+    for remote_file in remote_files_targeted_by_import:
+        if not remote_file.slots:
+            continue
+        slot_pixdim_primary_plane_map = {}
+        slot_affine_map = {}
+        for slot in remote_file.slots:
+            if not slot_is_medical(slot):
+                continue
+            slot_name = slot["slot_name"]
+            primary_plane = slot["metadata"]["medical"]["plane_map"][slot_name]
+            pixdims = [float(dim) for dim in slot["metadata"]["medical"]["pixdims"]]
+            slot_pixdim_primary_plane_map[slot_name] = (pixdims, primary_plane)
+            if not slot_is_handled_by_monai(slot):
+                slot_affine_map[slot["slot_name"]] = np.array(
+                    slot["metadata"]["medical"]["affine"], dtype=np.float64
+                )
+        if slot_pixdim_primary_plane_map:
+            pixdims_and_primary_planes[Path(remote_file.full_path)] = (
+                slot_pixdim_primary_plane_map
+            )
+        if slot_affine_map:
+            legacy_remote_file_slot_affine_map[Path(remote_file.full_path)] = (
+                slot_affine_map
+            )
+
+    return (
+        legacy_remote_file_slot_affine_map,
+        pixdims_and_primary_planes,
+    )
+
+
+def slot_is_medical(slot: Dict[str, Any]) -> bool:
+    return slot.get("metadata", {}).get("medical") is not None
+
+
+def slot_is_handled_by_monai(slot: Dict[str, Any]) -> bool:
+    return slot.get("metadata", {}).get("medical", {}).get("handler") == "MONAI"

@@ -1,7 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from unittest.mock import MagicMock, Mock, _patch, patch
 from zipfile import ZipFile
 
@@ -11,6 +11,7 @@ from darwin.future.data_objects.properties import (
     FullProperty,
     PropertyValue,
 )
+from darwin.item import DatasetItem
 import pytest
 from darwin import datatypes as dt
 from darwin.importer import get_importer
@@ -34,7 +35,16 @@ from darwin.importer.importer import (
     _warn_for_annotations_with_multiple_instance_ids,
     _serialize_item_level_properties,
     _split_payloads,
+    _get_remote_files_targeted_by_import,
+    _get_remote_medical_file_transform_requirements,
+    slot_is_medical,
+    slot_is_handled_by_monai,
+    MAX_URL_LENGTH,
+    BASE_URL_LENGTH,
 )
+from darwin.exceptions import RequestEntitySizeExceeded
+
+import numpy as np
 
 
 @pytest.fixture
@@ -3697,3 +3707,305 @@ def test__split_payloads_overwrites_on_first_payload_and_appends_on_the_rest():
     assert result[0]["overwrite"]
     assert not result[1]["overwrite"]
     assert not result[2]["overwrite"]
+
+
+def test__get_remote_files_targeted_by_import_success() -> None:
+    """Test successful case where files are found remotely."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    mock_remote_file1 = Mock(full_path="/path/to/file1.json")
+    mock_remote_file2 = Mock(full_path="/path/to/file2.json")
+
+    mock_dataset.fetch_remote_files.return_value = [
+        mock_remote_file1,
+        mock_remote_file2,
+    ]
+
+    def mock_importer(path: Path) -> List[dt.AnnotationFile]:
+        file_num = int(path.stem.replace("file", ""))
+        mock_file = Mock(
+            spec=dt.AnnotationFile,
+            filename=f"file{file_num}.json",
+            full_path=f"/path/to/file{file_num}.json",
+        )
+        return [mock_file]
+
+    result = _get_remote_files_targeted_by_import(
+        importer=mock_importer,
+        file_paths=[Path("file1.json"), Path("file2.json")],
+        dataset=mock_dataset,
+        console=mock_console,
+    )
+
+    assert len(result) == 2
+    assert result[0] == mock_remote_file1
+    assert result[1] == mock_remote_file2
+    mock_dataset.fetch_remote_files.assert_called_once()
+
+
+def test__get_remote_files_targeted_by_import_no_files_parsed() -> None:
+    """Test error case when no files can be parsed."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    def mock_importer(path: Path) -> Optional[List[dt.AnnotationFile]]:
+        return None
+
+    with pytest.raises(ValueError, match="Not able to parse any files."):
+        _get_remote_files_targeted_by_import(
+            importer=mock_importer,
+            file_paths=[Path("file1.json")],
+            dataset=mock_dataset,
+            console=mock_console,
+        )
+
+
+def test__get_remote_files_targeted_by_import_url_too_long() -> None:
+    """Test that files that would cause URL length to exceed limits are handled appropriately."""
+    mock_dataset = Mock()
+    mock_console = Mock()
+
+    very_long_filename = "a" * (MAX_URL_LENGTH - BASE_URL_LENGTH + 10) + ".json"
+
+    def mock_importer(path: Path) -> List[dt.AnnotationFile]:
+        mock_file = Mock(
+            spec=dt.AnnotationFile,
+            filename=very_long_filename,
+            full_path=f"/path/to/{very_long_filename}",
+        )
+        return [mock_file]
+
+    mock_dataset.fetch_remote_files.side_effect = RequestEntitySizeExceeded()
+
+    with pytest.raises(RequestEntitySizeExceeded):
+        _get_remote_files_targeted_by_import(
+            importer=mock_importer,
+            file_paths=[Path("file1.json")],
+            dataset=mock_dataset,
+            console=mock_console,
+        )
+
+    mock_dataset.fetch_remote_files.assert_called_once_with(
+        filters={"item_names": [very_long_filename]}
+    )
+
+
+def test__get_remote_medical_file_transform_requirements_empty_list():
+    """Test that empty input list returns empty dictionaries"""
+    remote_files: List[DatasetItem] = []
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {}
+
+
+def test__get_remote_medical_file_transform_requirements_no_slots():
+    """Test that files with no slots are handled correctly"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = None
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {}
+
+
+def test__get_remote_medical_file_transform_requirements_non_medical_slots():
+    """Test that files with non-medical slots are handled correctly"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [{"slot_name": "slot1", "metadata": {}}]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {}
+
+
+def test__get_remote_medical_file_transform_requirements_monai_axial():
+    """Test MONAI-handled medical slots with AXIAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "AXIAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {
+        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")}
+    }
+
+
+def test__get_remote_medical_file_transform_requirements_monai_coronal():
+    """Test MONAI-handled medical slots with CORONAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "CORONAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {
+        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "CORONAL")}
+    }
+
+
+def test__get_remote_medical_file_transform_requirements_monai_sagittal():
+    """Test MONAI-handled medical slots with SAGGITAL plane"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "SAGITTAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert legacy_scaling == {}
+    assert pixdims_and_primary_planes == {
+        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "SAGITTAL")}
+    }
+
+
+def test__get_remote_medical_file_transform_requirements_legacy_nifti():
+    """Test legacy NifTI scaling"""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                    "plane_map": {"slot1": "AXIAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file.full_path = "/path/to/file"
+    remote_files: List[DatasetItem] = [mock_file]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+    assert pixdims_and_primary_planes == {
+        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")}
+    }
+    assert Path("/path/to/file") in legacy_scaling
+    assert "slot1" in legacy_scaling[Path("/path/to/file")]
+    assert legacy_scaling[Path("/path/to/file")]["slot1"].shape == (4, 4)
+    assert (
+        legacy_scaling[Path("/path/to/file")]["slot1"]
+        == np.array(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
+        )
+    ).all()
+
+
+def test__get_remote_medical_file_transform_requirements_mixed():
+    """Test mixed case with both MONAI and legacy NifTI files"""
+    mock_file1 = MagicMock(spec=DatasetItem)
+    mock_file1.slots = [
+        {
+            "slot_name": "slot1",
+            "metadata": {
+                "medical": {
+                    "handler": "MONAI",
+                    "plane_map": {"slot1": "AXIAL"},
+                    "pixdims": [1.0, 2.0, 3.0],
+                }
+            },
+        }
+    ]
+    mock_file1.full_path = "/path/to/file1"
+
+    mock_file2 = MagicMock(spec=DatasetItem)
+    mock_file2.slots = [
+        {
+            "slot_name": "slot2",
+            "metadata": {
+                "medical": {
+                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                    "pixdims": [1.0, 2.0, 3.0],
+                    "plane_map": {"slot2": "AXIAL"},
+                }
+            },
+        }
+    ]
+    mock_file2.full_path = "/path/to/file2"
+
+    remote_files: List[DatasetItem] = [mock_file1, mock_file2]
+    legacy_scaling, pixdims_and_primary_planes = (
+        _get_remote_medical_file_transform_requirements(remote_files)
+    )
+
+    assert pixdims_and_primary_planes == {
+        Path("/path/to/file1"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")},
+        Path("/path/to/file2"): {"slot2": ([1.0, 2.0, 3.0], "AXIAL")},
+    }
+    assert Path("/path/to/file2") in legacy_scaling
+    assert "slot2" in legacy_scaling[Path("/path/to/file2")]
+    assert legacy_scaling[Path("/path/to/file2")]["slot2"].shape == (4, 4)
+    assert (
+        legacy_scaling[Path("/path/to/file2")]["slot2"]
+        == np.array(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
+        )
+    ).all()
+
+
+def test_slot_is_medical():
+    """
+    Test that slot_is_medical returns True if the slot has medical metadata
+    """
+    medical_slot = {"metadata": {"medical": {}}}
+    non_medical_slot = {"metadata": {}}
+    assert slot_is_medical(medical_slot) is True
+    assert slot_is_medical(non_medical_slot) is False
+
+
+def test_slot_is_handled_by_monai():
+    """
+    Test that slot_is_handled_by_monai returns True if the slot has MONAI handler
+    """
+    monai_slot = {"metadata": {"medical": {"handler": "MONAI"}}}
+    non_monai_slot = {"metadata": {"medical": {}}}
+    assert slot_is_handled_by_monai(monai_slot) is True
+    assert slot_is_handled_by_monai(non_monai_slot) is False

@@ -990,24 +990,6 @@ class RemoteDataset(ABC):
         """
         ...
 
-    @abstractmethod
-    def _get_remote_files_that_require_legacy_scaling(self) -> List[Path]:
-        """
-        Get all remote files that have been scaled upon upload. These files require that
-        NifTI annotations are similarly scaled during import
-
-        Parameters
-        ----------
-        dataset : RemoteDataset
-            The remote dataset to get the files from
-
-        Returns
-        -------
-        List[Path]
-            A list of full remote paths of dataset items that require NifTI annotations to be scaled
-        """
-        ...
-
     @property
     def remote_path(self) -> Path:
         """Returns an URL specifying the location of the remote dataset."""
