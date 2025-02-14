@@ -82,6 +82,8 @@ See our development and QA environment installation recommendations [here](docs/
 
 ## Usage as a Command Line Interface (CLI)
 
+[Here you can find V7 labs doc on the CLI usage](https://docs.v7labs.com/docs/getting-started-1)
+
 Once installed, `darwin` is accessible as a command line tool.
 A useful way to navigate the CLI usage is through the help command `-h/--help` which will
 provide additional information for each command available.
@@ -193,6 +195,8 @@ Dataset example-team/test:0.1 downloaded at /directory/choosen/at/authentication
 ---
 
 ## Usage as a Python library
+
+[Here you can find V7 labs doc on the usage as Python library](https://docs.v7labs.com/docs/install-update-the-darwin-sdk)
 
 The framework is designed to be usable as a standalone python library.
 Usage can be inferred from looking at the operations performed in `darwin/cli_functions.py`.
